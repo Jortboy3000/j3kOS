@@ -145,6 +145,33 @@ gdt_data:
     db 0xCF         ; flags: 4KB gran, 32-bit
     db 0x00         ; base high
 
+gdt_user_code:
+    ; user code segment: 4GB flat, ring 3
+    dw 0xFFFF       ; limit low
+    dw 0x0000       ; base low
+    db 0x00         ; base mid
+    db 0xFA         ; access: present, ring 3, code, readable
+    db 0xCF         ; flags: 4KB gran, 32-bit
+    db 0x00         ; base high
+
+gdt_user_data:
+    ; user data segment: 4GB flat, ring 3
+    dw 0xFFFF       ; limit low
+    dw 0x0000       ; base low
+    db 0x00         ; base mid
+    db 0xF2         ; access: present, ring 3, data, writable
+    db 0xCF         ; flags: 4KB gran, 32-bit
+    db 0x00         ; base high
+
+gdt_tss:
+    ; TSS descriptor
+    dw 103          ; limit (104 bytes - 1)
+    dw 0x0000       ; base low (will be set by kernel)
+    db 0x00         ; base mid
+    db 0x89         ; access: present, ring 0, TSS available
+    db 0x00         ; flags
+    db 0x00         ; base high
+
 gdt_end:
 
 gdt_descriptor:

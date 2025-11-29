@@ -1,162 +1,195 @@
-# j3kOS - Protected Mode Operating System
+# j3kOS - A Fucking Operating System
 **by Jortboy3k (@jortboy3k)**
 
-## Overview
-j3kOS is a custom x86 operating system that boots into 32-bit protected mode with a proper flat memory model, interrupt handling, and device drivers.
+> *"Why the fuck did I make this? Because I could."*
 
-## Architecture
+## What the hell is this?
 
-### Boot Sequence
-1. **Stage 1 - Bootloader (512 bytes at 0x7C00)**
-   - BIOS loads first sector to 0x7C00
-   - Sets up segments, saves boot drive
-   - Loads Stage 2 (10 sectors) to 0x1000
-   - Jumps to Stage 2
+j3kOS is my custom x86 OS that actually boots into 32-bit protected mode without shitting itself. It's got proper flat memory, interrupts that don't crash, and drivers that kinda work. Built this whole thing in assembly because apparently I hate myself.
 
-2. **Stage 2 - Loader (5KB at 0x1000)**
-   - Loads 32-bit kernel (20 sectors) to 0x10000
-   - Enables A20 line for full memory access
-   - Sets up GDT (Global Descriptor Table)
-   - Switches to protected mode
-   - Jumps to 32-bit kernel
+## How this shit boots
 
-3. **Kernel (32-bit at 0x10000)**
-   - Initializes IDT (Interrupt Descriptor Table)
-   - Remaps PIC (Programmable Interrupt Controller)
-   - Sets up PIT timer at 100Hz
-   - Initializes keyboard driver
-   - Launches interactive shell
+### Stage 1 - The Bootloader (512 bytes of pure chaos)
+- BIOS yeeets our code to 0x7C00
+- We grab the boot drive and load Stage 2
+- 10 sectors of "please don't fuck up" energy
+- Jump to Stage 2 like we know what we're doing
 
-### Memory Layout
+### Stage 2 - The Loader (5KB of 16-bit hell)
+- Loads the actual 32-bit kernel (20 sectors to 0x10000)
+- Enables A20 line (whatever tf that is)
+- Sets up the GDT so we can pretend we're professional
+- Flips the pmode switch
+- Jumps into 32-bit land
+
+### Kernel (The actual OS bit)
+- Initializes IDT (256 interrupt gates because fuck it)
+- Remaps the PIC (cuz BIOS is shit at IRQ handling)
+- Gets the timer running at 100Hz
+- Keyboard driver that actually works
+- Shell that lets you type shit
+
+## Memory Map (don't fucking touch these)
 ```
-0x00000000 - 0x000003FF : Real Mode IVT (unused in pmode)
-0x00000400 - 0x000004FF : BIOS Data Area
-0x00000500 - 0x00007BFF : Free conventional memory
-0x00007C00 - 0x00007DFF : Bootloader (512 bytes)
-0x00007E00 - 0x00000FFF : Stack space
-0x00001000 - 0x00002400 : Loader (5KB)
-0x00010000 - 0x00012800 : 32-bit Kernel (10KB)
-0x00090000 - 0x0009FFFF : Kernel stack
-0x000A0000 - 0x000BFFFF : VGA memory
-0x000B8000 - 0x000B8FA0 : Text mode video buffer
+0x00007C00 : Bootloader lives here
+0x00001000 : Loader hangs out here  
+0x00010000 : Kernel does its thing here
+0x00090000 : Stack (hope we don't overflow lol)
+0x000B8000 : VGA text buffer (poke this for colors)
+0x00100000 : Heap starts here (1MB, malloc your shit)
 ```
 
-### Features
+## Features that actually work
 
-#### Interrupt Handling
-- **IDT**: 256 interrupt gates
-- **PIC**: Remapped to IRQ 32-47 (avoids conflict with CPU exceptions)
-- **IRQ0 (Timer)**: 100Hz tick rate for timing
-- **IRQ1 (Keyboard)**: PS/2 keyboard with scancode translation
+### Interrupts n Shit
+- **IDT**: 256 interrupt gates cuz why not
+- **PIC**: Remapped so it doesn't fight with CPU exceptions
+- **Timer**: 100Hz tick for when you need to know wtf is happening
+- **Keyboard**: PS/2 with ring buffer, shift/caps lock support, and arrow keys
 
-#### Device Drivers
-- **Keyboard**: Ring buffer with 256-byte capacity, US QWERTY layout
-- **Video**: Direct VGA text mode access at 0xB8000, 80x25 characters
-- **Timer**: Millisecond precision timing from PIT
+### Hardware Drivers (kinda)
+- **Keyboard**: Type shit, it shows up. Magic.
+- **Video**: 80x25 text mode, scrolling works
+- **Timer**: Counts ticks since boot
+- **RTC**: Real date/time from CMOS
+- **PCI**: Scan that bus for hardware
+- **RTL8139**: Network card (if you're brave enough)
 
-#### Shell Commands
-- `help` - Display available commands
-- `clear` - Clear the screen
-- `time` - Show timer ticks since boot
+### System Shit
+- **Memory allocator**: malloc/free at 1MB heap
+- **System calls**: INT 0x80 interface for syscalls
+- **Task switching**: TSS and basic multitasking
+- **Command history**: Up/down arrows like a real shell
 
-## Building
+## Shell Commands (all need : prefix you cuck)
 
-### Prerequisites
-- **NASM** (Netwide Assembler) - [Download](https://www.nasm.us/)
-- **QEMU** (optional, for testing) - [Download](https://www.qemu.org/)
+```
+:help       - show this shit
+:clear      - clear the screen
+:time       - timer ticks (boring)
+:datetime   - actual date/time from RTC
+:timezone   - set timezone offset (+/-n)
+:mem        - memory info
+:ver        - OS version
+:pci        - scan PCI bus for devices
+:malloc     - test allocate 256 bytes
+:syscall    - test INT 0x80 interface
+:tasks      - show task info
+:net        - initialize RTL8139 network card
+:say <msg>  - echo with dramatic effect
+:reboot     - restart (triple fault style)
 
-### Build Instructions
+Files:
+:list/:show         - list files
+:make/:create <n>   - create file
+:read/:open <n>     - read file
+:delete/:remove <n> - delete file
+```
+
+## Building this clusterfuck
+
+### You need:
+- **NASM** - because we're doing this in assembly like cavemen
+- **QEMU** - to actually test this without bricking your PC
+
+### Build it:
 ```bash
-# Build the OS image
-.\build_simple.bat
-
-# Output: j3kOS.img (31.5KB floppy image)
+.\build.bat
 ```
 
-### Running
+### Run it:
 ```bash
-# Run in QEMU
-.\test32.bat
-
-# Or manually:
-qemu-system-i386 -fda j3kOS.img -m 32M
+.\test.bat
+# or just: qemu-system-i386 -fda j3kOS.img
 ```
 
 ## File Structure
 ```
 j3kOS/
-├── boot.asm           - Stage 1 bootloader (512 bytes)
-├── loader.asm         - Stage 2 loader (5KB, 16-bit)
-├── kernel32_flat.asm  - 32-bit protected mode kernel
-├── build_simple.bat   - Build script
-├── test32.bat         - QEMU test launcher
-└── j3kOS.img          - Bootable floppy image
+├── boot.asm       - 512 byte bootloader (stage 1)
+├── loader.asm     - 5KB loader (stage 2) 
+├── kernel32.asm   - the actual OS (32-bit pmode)
+├── build.bat      - build this fucking thing
+├── test.bat       - run in QEMU
+└── j3kOS.img      - bootable floppy image
 ```
 
-## Technical Details
+## Technical Shit
 
-### Global Descriptor Table (GDT)
+### GDT (Global Descriptor Table)
 ```
-Null Descriptor  : 0x00
-Code Segment     : 0x08 (Base: 0, Limit: 4GB, R/X)
-Data Segment     : 0x10 (Base: 0, Limit: 4GB, R/W)
-```
-
-### Interrupt Vector Table
-```
-0x00-0x1F : CPU Exceptions
-0x20      : IRQ0 - PIT Timer
-0x21      : IRQ1 - Keyboard
-0x22-0x2F : IRQ2-15 (reserved)
-0x30-0xFF : Available for software interrupts
+0x00 : Null (cuz reasons)
+0x08 : Kernel Code (ring 0, 4GB flat)
+0x10 : Kernel Data (ring 0, 4GB flat)
+0x18 : User Code (ring 3, for syscalls)
+0x20 : User Data (ring 3, for syscalls)
+0x28 : TSS (task switching bullshit)
 ```
 
-### Keyboard Scancodes
-The keyboard driver translates PS/2 Set 1 scancodes to ASCII using a lookup table for US QWERTY layout.
+### Interrupts
+```
+0x00-0x1F : CPU exceptions (don't trigger these)
+0x20      : Timer (ticks every 10ms)
+0x21      : Keyboard (type shit here)
+0x80      : System calls (INT 0x80)
+```
 
-## Roadmap
+## What Actually Works ✓
 
-### Completed ✓
-- [x] Protected mode transition with flat memory model
-- [x] IDT and interrupt handling
-- [x] PIC initialization and IRQ remapping
+- [x] Protected mode with flat memory (no segmentation bullshit)
+- [x] IDT with 256 interrupt gates
+- [x] PIC remapping (IRQs 32-47)
 - [x] PIT timer at 100Hz
-- [x] PS/2 keyboard driver with ring buffer
-- [x] VGA text mode output with scrolling
-- [x] Interactive shell with command parsing
+- [x] PS/2 keyboard with ring buffer
+- [x] Shift, caps lock, and arrow keys
+- [x] VGA text mode with scrolling
+- [x] Shell with command history (up/down arrows)
+- [x] RTC driver for real date/time
+- [x] Timezone support
+- [x] PCI bus enumeration
+- [x] Memory allocator (malloc/free)
+- [x] System call interface (INT 0x80)
+- [x] Task switching with TSS
+- [x] RTL8139 network driver initialization
+- [x] File system (in-memory, 16 files)
 
-### In Progress
-- [ ] Test kernel functionality
-- [ ] Add more shell commands
+## TODO (if I feel like it)
 
-### Planned
-- [ ] PCI bus enumeration
-- [ ] RTL8139 network driver
-- [ ] TCP/IP stack (ARP, ICMP, UDP, TCP)
-- [ ] File system support
-- [ ] Multitasking
+- [ ] Actually send/receive network packets
+- [ ] TCP/IP stack (lol good luck)
+- [ ] File system with actual storage
+- [ ] More task switching features
 - [ ] User mode programs
+- [ ] Not crash randomly
 
-## Development Notes
+## How to add shit
 
-### Adding New Commands
-1. Add command string to data section
-2. Implement handler in `process_command`
-3. Add to help text
+### New Commands
+1. Add the string to the command list
+2. Write a handler in `process_command`
+3. Update the help text
+4. Hope it doesn't break everything
 
-### Adding New Interrupts
-1. Create handler function ending with `iret`
+### New Interrupts  
+1. Write handler ending with `iret`
 2. Install in IDT during `init_idt`
-3. Unmask IRQ in PIC if needed
+3. Unmask the IRQ in PIC
+4. Pray to the assembly gods
 
-### Debugging
-- Use QEMU monitor (Ctrl+Alt+2) for debugging
-- Check register states with `info registers`
-- View memory with `x/32x 0x10000`
+## Debugging (when shit breaks)
+
+- QEMU monitor: Ctrl+Alt+2
+- Check registers: `info registers`
+- Dump memory: `x/32x 0x10000`
+- Add print statements everywhere
+- Give up and rewrite it
 
 ## Credits
-Created by **Jortboy3k**  
-Twitter/X: [@jortboy3k](https://twitter.com/jortboy3k)
+
+Made by **Jortboy3k** because apparently I have nothing better to do.
+
+Hit me up: [@jortboy3k](https://twitter.com/jortboy3k)
 
 ## License
-Educational project - feel free to learn from and modify!
+
+Do whatever the fuck you want with it. Just don't blame me when it breaks.

@@ -4,4 +4,4 @@ echo Press Ctrl+Alt+G to release mouse
 echo Press Ctrl+Alt+F to toggle fullscreen
 echo.
 
-qemu-system-i386 -fda j3kOS.img -m 32M
+"C:\Program Files\qemu\qemu-system-i386.exe" -drive format=raw,file=j3kOS.img -m 32M
