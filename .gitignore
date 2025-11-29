@@ -1,0 +1,31 @@
+# j3kOS - don't commit this shit
+
+# build outputs
+*.bin
+*.img
+*.iso
+
+# assembly listings
+*.lst
+
+# editor backup crap
+*~
+*.swp
+*.swo
+.*.swp
+
+# IDE shit
+.vscode/
+.idea/
+*.suo
+*.user
+
+# OS garbage
+Thumbs.db
+.DS_Store
+
+# logs
+*.log
+
+# old 16-bit kernel backup
+old_16bit/
