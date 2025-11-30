@@ -32,6 +32,9 @@ kernel_start:
     ; set up task switching
     call init_tss
     
+    ; initialize page management
+    call init_page_mgmt
+    
     ; enable interrupts you cuck
     sti
     
@@ -830,8 +833,47 @@ HEAP_SIZE equ 0x100000      ; 1MB heap
 BLOCK_HEADER_SIZE equ 16
 HEAP_MAGIC equ 0xDEADBEEF
 
+; page management for hot/cold memory
+PAGE_SIZE equ 4096
+PAGE_COUNT equ 256          ; track 256 pages (1MB / 4KB)
+PAGE_HOT_THRESHOLD equ 10   ; accesses before page is "hot"
+PAGE_COLD_THRESHOLD equ 2   ; ticks without access = "cold"
+
+; page states
+PAGE_FREE equ 0
+PAGE_ALLOCATED equ 1
+PAGE_HOT equ 2
+PAGE_COLD equ 3
+PAGE_COMPRESSED equ 4
+PAGE_SWAPPED equ 5
+
 heap_initialized: dd 0
 heap_first_block: dd HEAP_START
+
+; page tracking table (16 bytes per page)
+; offset 0: state (1 byte)
+; offset 1: access_count (1 byte)
+; offset 2: ticks_since_access (2 bytes)
+; offset 4: physical_addr (4 bytes)
+; offset 8: compressed_size (4 bytes)
+; offset 12: flags (4 bytes)
+page_table: times (PAGE_COUNT * 16) db 0
+page_stats_hot: dd 0
+page_stats_cold: dd 0
+page_stats_compressed: dd 0
+page_stats_swapped: dd 0
+
+; memory pressure management
+memory_pressure: dd 0           ; 0=low, 1=medium, 2=high
+free_page_count: dd PAGE_COUNT
+compress_on_cold: db 1          ; auto-compress when page becomes cold
+
+; swap space management
+SWAP_START_SECTOR equ 100       ; start sector for swap space on disk
+SWAP_SECTORS equ 256            ; 256 sectors = 128KB swap space
+swap_bitmap: times 32 db 0      ; 256 bits for 256 swap slots
+swap_write_count: dd 0          ; stats
+swap_read_count: dd 0
 
 ; initialize the heap
 init_heap:
@@ -930,6 +972,846 @@ free:
         pop esi
         pop ebx
         ret
+
+; ========================================
+; PAGE MANAGEMENT - HOT/COLD MEMORY
+; ========================================
+
+; initialize page management system
+init_page_mgmt:
+    pusha
+    
+    ; mark all pages as free initially
+    mov ecx, PAGE_COUNT
+    mov edi, page_table
+    xor eax, eax
+    .init_loop:
+        stosb               ; state = FREE
+        stosb               ; access_count = 0
+        stosw               ; ticks_since_access = 0
+        stosd               ; physical_addr = 0
+        stosd               ; compressed_size = 0
+        stosd               ; flags = 0
+        loop .init_loop
+    
+    popa
+    ret
+
+; allocate a page (4KB)
+; returns EAX = page index (or -1 if failed)
+alloc_page:
+    push ebx
+    push ecx
+    push edi
+    
+    ; find first free page
+    mov ecx, PAGE_COUNT
+    mov edi, page_table
+    xor ebx, ebx
+    
+    .search_loop:
+        cmp byte [edi], PAGE_FREE
+        je .found_page
+        add edi, 16
+        inc ebx
+        loop .search_loop
+    
+    ; no free pages
+    mov eax, -1
+    jmp .done
+    
+    .found_page:
+        ; mark as allocated
+        mov byte [edi], PAGE_ALLOCATED
+        mov byte [edi + 1], 0           ; access_count = 0
+        mov word [edi + 2], 0           ; ticks_since_access = 0
+        
+        ; calculate physical address
+        mov eax, ebx
+        shl eax, 12                     ; * 4096
+        add eax, HEAP_START
+        mov [edi + 4], eax              ; store physical addr
+        
+        ; update free count
+        dec dword [free_page_count]
+        
+        mov eax, ebx                    ; return page index
+    
+    .done:
+        pop edi
+        pop ecx
+        pop ebx
+        ret
+
+; free a page
+; EAX = page index
+free_page:
+    push ebx
+    push edi
+    
+    ; bounds check
+    cmp eax, PAGE_COUNT
+    jge .done
+    
+    ; get page entry
+    mov ebx, eax
+    shl ebx, 4                          ; * 16
+    add ebx, page_table
+    
+    ; check if compressed/swapped, need to free that too
+    cmp byte [ebx], PAGE_COMPRESSED
+    je .free_compressed
+    cmp byte [ebx], PAGE_SWAPPED
+    je .free_swapped
+    jmp .mark_free
+    
+    .free_compressed:
+        dec dword [page_stats_compressed]
+        jmp .mark_free
+    
+    .free_swapped:
+        dec dword [page_stats_swapped]
+        jmp .mark_free
+    
+    .mark_free:
+        mov byte [ebx], PAGE_FREE
+        mov dword [ebx + 4], 0
+        mov dword [ebx + 8], 0
+        
+        ; update free count
+        inc dword [free_page_count]
+    
+    .done:
+        pop edi
+        pop ebx
+        ret
+
+; access a page (track for hot/cold)
+; EAX = page index
+access_page:
+    push ebx
+    push edi
+    
+    ; bounds check
+    cmp eax, PAGE_COUNT
+    jge .done
+    
+    ; get page entry
+    mov ebx, eax
+    shl ebx, 4
+    add ebx, page_table
+    
+    ; check if page is swapped out - need to swap in first
+    cmp byte [ebx], PAGE_SWAPPED
+    jne .not_swapped
+    
+    push eax
+    call swap_page_in
+    pop eax
+    
+    .not_swapped:
+    ; increment access count
+    inc byte [ebx + 1]
+    mov word [ebx + 2], 0               ; reset ticks_since_access
+    
+    ; check if should promote to hot
+    cmp byte [ebx + 1], PAGE_HOT_THRESHOLD
+    jl .done
+    
+    ; promote to hot if not already
+    cmp byte [ebx], PAGE_HOT
+    je .done
+    
+    mov byte [ebx], PAGE_HOT
+    inc dword [page_stats_hot]
+    
+    .done:
+        pop edi
+        pop ebx
+        ret
+
+; update page aging (call from timer)
+update_page_aging:
+    pusha
+    
+    mov ecx, PAGE_COUNT
+    mov edi, page_table
+    
+    .age_loop:
+        ; skip free pages
+        cmp byte [edi], PAGE_FREE
+        je .next_page
+        
+        ; increment ticks since access
+        inc word [edi + 2]
+        
+        ; check if should demote to cold
+        cmp word [edi + 2], PAGE_COLD_THRESHOLD
+        jl .next_page
+        
+        ; demote hot page to cold
+        cmp byte [edi], PAGE_HOT
+        jne .check_allocated
+        
+        mov byte [edi], PAGE_COLD
+        dec dword [page_stats_hot]
+        inc dword [page_stats_cold]
+        
+        ; auto-compress if enabled
+        cmp byte [compress_on_cold], 1
+        jne .next_page
+        
+        push eax
+        push edi
+        ; calculate page index
+        mov eax, edi
+        sub eax, page_table
+        shr eax, 4
+        call compress_page
+        pop edi
+        pop eax
+        jmp .next_page
+        
+        .check_allocated:
+            ; demote allocated to cold
+            cmp byte [edi], PAGE_ALLOCATED
+            jne .next_page
+            
+            mov byte [edi], PAGE_COLD
+            inc dword [page_stats_cold]
+            
+            ; auto-compress if enabled
+            cmp byte [compress_on_cold], 1
+            jne .next_page
+            
+            push eax
+            push edi
+            ; calculate page index
+            mov eax, edi
+            sub eax, page_table
+            shr eax, 4
+            call compress_page
+            pop edi
+            pop eax
+        
+        .next_page:
+            add edi, 16
+            loop .age_loop
+    
+    ; calculate memory pressure
+    call calculate_memory_pressure
+    
+    popa
+    ret
+
+; calculate current memory pressure
+calculate_memory_pressure:
+    pusha
+    
+    ; count free pages
+    xor ebx, ebx        ; free count
+    mov ecx, PAGE_COUNT
+    mov edi, page_table
+    
+    .count_loop:
+        cmp byte [edi], PAGE_FREE
+        jne .not_free
+        inc ebx
+        .not_free:
+        add edi, 16
+        loop .count_loop
+    
+    mov [free_page_count], ebx
+    
+    ; calculate pressure level
+    ; high pressure: < 10% free (< 25 pages)
+    ; medium pressure: < 25% free (< 64 pages)
+    ; low pressure: >= 25% free
+    
+    cmp ebx, 25
+    jl .high_pressure
+    cmp ebx, 64
+    jl .medium_pressure
+    
+    ; low pressure
+    mov dword [memory_pressure], 0
+    jmp .done
+    
+    .medium_pressure:
+        mov dword [memory_pressure], 1
+        ; compress some cold pages proactively
+        call compress_cold_pages
+        jmp .done
+    
+    .high_pressure:
+        mov dword [memory_pressure], 2
+        ; aggressively compress cold pages
+        call compress_cold_pages
+        ; swap out compressed pages if still high pressure
+        call swap_out_pages
+        ; swap out compressed pages if still high pressure
+        call swap_out_pages
+    
+    .done:
+        popa
+        ret
+
+; disk I/O functions
+; write sector to disk
+; eax = LBA sector number
+; edi = source buffer
+write_disk_sector:
+    pusha
+    
+    push eax
+    
+    ; wait for disk ready
+    mov dx, 0x1F7
+    .wait_ready:
+        in al, dx
+        test al, 0x80
+        jnz .wait_ready
+    
+    pop eax
+    
+    ; send sector count (1)
+    mov dx, 0x1F2
+    mov al, 1
+    out dx, al
+    
+    ; send LBA
+    pop eax
+    push eax
+    mov dx, 0x1F3
+    out dx, al
+    
+    shr eax, 8
+    mov dx, 0x1F4
+    out dx, al
+    
+    shr eax, 8
+    mov dx, 0x1F5
+    out dx, al
+    
+    shr eax, 8
+    mov dx, 0x1F6
+    and al, 0x0F
+    or al, 0xE0         ; LBA mode, master
+    out dx, al
+    
+    ; send write command
+    mov dx, 0x1F7
+    mov al, 0x30
+    out dx, al
+    
+    ; wait for ready
+    .wait_write:
+        in al, dx
+        test al, 0x80
+        jnz .wait_write
+    
+    ; write 256 words (512 bytes)
+    mov ecx, 256
+    mov dx, 0x1F0
+    .write_loop:
+        mov ax, [edi]
+        out dx, ax
+        add edi, 2
+        loop .write_loop
+    
+    pop eax
+    popa
+    ret
+
+; read sector from disk
+; eax = LBA sector number
+; edi = dest buffer
+read_disk_sector:
+    pusha
+    
+    push eax
+    
+    ; wait for disk ready
+    mov dx, 0x1F7
+    .wait_ready:
+        in al, dx
+        test al, 0x80
+        jnz .wait_ready
+    
+    pop eax
+    
+    ; send sector count (1)
+    mov dx, 0x1F2
+    mov al, 1
+    out dx, al
+    
+    ; send LBA
+    pop eax
+    push eax
+    mov dx, 0x1F3
+    out dx, al
+    
+    shr eax, 8
+    mov dx, 0x1F4
+    out dx, al
+    
+    shr eax, 8
+    mov dx, 0x1F5
+    out dx, al
+    
+    shr eax, 8
+    mov dx, 0x1F6
+    and al, 0x0F
+    or al, 0xE0         ; LBA mode, master
+    out dx, al
+    
+    ; send read command
+    mov dx, 0x1F7
+    mov al, 0x20
+    out dx, al
+    
+    ; wait for ready
+    .wait_read:
+        in al, dx
+        test al, 0x80
+        jnz .wait_read
+    
+    ; read 256 words (512 bytes)
+    mov ecx, 256
+    mov dx, 0x1F0
+    .read_loop:
+        in ax, dx
+        mov [edi], ax
+        add edi, 2
+        loop .read_loop
+    
+    pop eax
+    popa
+    ret
+
+; allocate a swap slot
+; returns: eax = swap slot number, or -1 if full
+alloc_swap_slot:
+    push ebx
+    push ecx
+    push edx
+    
+    xor ebx, ebx        ; byte index
+    .byte_loop:
+        cmp ebx, 32
+        jge .no_slot
+        
+        mov al, [swap_bitmap + ebx]
+        cmp al, 0xFF
+        je .next_byte
+        
+        ; find free bit in this byte
+        xor ecx, ecx
+        .bit_loop:
+            cmp ecx, 8
+            jge .next_byte
+            
+            mov dl, 1
+            shl dl, cl
+            test al, dl
+            jz .found_slot
+            
+            inc ecx
+            jmp .bit_loop
+        
+        .next_byte:
+            inc ebx
+            jmp .byte_loop
+    
+    .found_slot:
+        ; mark bit as used
+        or byte [swap_bitmap + ebx], dl
+        
+        ; calculate slot number
+        mov eax, ebx
+        shl eax, 3
+        add eax, ecx
+        jmp .done
+    
+    .no_slot:
+        mov eax, -1
+    
+    .done:
+        pop edx
+        pop ecx
+        pop ebx
+        ret
+
+; free a swap slot
+; eax = swap slot number
+free_swap_slot:
+    push ebx
+    push ecx
+    push edx
+    
+    ; calculate byte and bit
+    mov ebx, eax
+    shr ebx, 3          ; byte index
+    mov ecx, eax
+    and ecx, 7          ; bit index
+    
+    ; clear bit
+    mov dl, 1
+    shl dl, cl
+    not dl
+    and byte [swap_bitmap + ebx], dl
+    
+    pop edx
+    pop ecx
+    pop ebx
+    ret
+
+; swap page out to disk
+; eax = page index
+swap_page_out:
+    pusha
+    
+    ; get page entry
+    mov ebx, eax
+    shl ebx, 4
+    add ebx, page_table
+    
+    ; check if page can be swapped
+    movzx ecx, byte [ebx]
+    cmp ecx, PAGE_COLD
+    je .can_swap
+    cmp ecx, PAGE_COMPRESSED
+    je .can_swap
+    jmp .done           ; can't swap hot or allocated pages
+    
+    .can_swap:
+        ; allocate swap slot
+        call alloc_swap_slot
+        cmp eax, -1
+        je .done        ; no swap space available
+        
+        mov edx, eax    ; save swap slot
+        
+        ; calculate disk sector (8 sectors per 4KB page)
+        mov eax, edx
+        shl eax, 3      ; * 8 sectors
+        add eax, SWAP_START_SECTOR
+        
+        ; get physical address
+        mov edi, [ebx + 4]
+        
+        ; write 8 sectors (4KB)
+        mov ecx, 8
+        .write_sectors:
+            push eax
+            push ecx
+            call write_disk_sector
+            pop ecx
+            pop eax
+            inc eax
+            add edi, 512
+            loop .write_sectors
+        
+        ; update page state
+        mov byte [ebx], PAGE_SWAPPED
+        mov dword [ebx + 8], edx    ; store swap slot in compressed_size field
+        
+        ; update stats
+        dec dword [page_stats_cold]
+        inc dword [page_stats_swapped]
+        inc dword [swap_write_count]
+        inc dword [free_page_count]
+    
+    .done:
+        popa
+        ret
+
+; swap page in from disk
+; eax = page index
+swap_page_in:
+    pusha
+    
+    ; get page entry
+    mov ebx, eax
+    shl ebx, 4
+    add ebx, page_table
+    
+    ; check if page is swapped
+    cmp byte [ebx], PAGE_SWAPPED
+    jne .done
+    
+    ; get swap slot
+    mov edx, [ebx + 8]
+    
+    ; calculate disk sector
+    mov eax, edx
+    shl eax, 3
+    add eax, SWAP_START_SECTOR
+    
+    ; get physical address
+    mov edi, [ebx + 4]
+    
+    ; read 8 sectors (4KB)
+    mov ecx, 8
+    .read_sectors:
+        push eax
+        push ecx
+        call read_disk_sector
+        pop ecx
+        pop eax
+        inc eax
+        add edi, 512
+        loop .read_sectors
+    
+    ; free swap slot
+    mov eax, edx
+    call free_swap_slot
+    
+    ; update page state
+    mov byte [ebx], PAGE_COLD
+    mov dword [ebx + 8], 0
+    
+    ; update stats
+    dec dword [page_stats_swapped]
+    inc dword [page_stats_cold]
+    inc dword [swap_read_count]
+    dec dword [free_page_count]
+    
+    .done:
+        popa
+        ret
+
+%include "swap_system.asm"
+
+; compress multiple cold pages (for memory pressure)
+compress_cold_pages:
+    pusha
+    
+    mov ecx, PAGE_COUNT
+    mov edi, page_table
+    mov ebx, 0          ; compressed count
+    
+    .compress_loop:
+        cmp byte [edi], PAGE_COLD
+        jne .next_page
+        
+        ; try to compress this page
+        push eax
+        push edi
+        mov eax, edi
+        sub eax, page_table
+        shr eax, 4
+        call compress_page
+        pop edi
+        pop eax
+        
+        ; limit compression per call
+        inc ebx
+        cmp ebx, 10         ; compress max 10 pages per call
+        jge .done
+        
+        .next_page:
+            add edi, 16
+            loop .compress_loop
+    
+    .done:
+        popa
+        ret
+
+; compress a cold page (simple RLE compression)
+; EAX = page index
+; returns EAX = compressed size (or 0 if failed)
+compress_page:
+    push ebx
+    push ecx
+    push edx
+    push esi
+    push edi
+    
+    ; get page entry
+    mov ebx, eax
+    shl ebx, 4
+    add ebx, page_table
+    
+    ; must be cold to compress
+    cmp byte [ebx], PAGE_COLD
+    jne .failed
+    
+    ; source = physical address
+    mov esi, [ebx + 4]
+    
+    ; allocate temp buffer for compressed data (max 4KB)
+    mov ecx, PAGE_SIZE
+    call malloc
+    test eax, eax
+    jz .failed
+    mov edi, eax
+    
+    ; simple RLE compression
+    mov ecx, PAGE_SIZE
+    xor edx, edx                        ; compressed size counter
+    
+    .compress_loop:
+        test ecx, ecx
+        jz .compress_done
+        
+        lodsb                           ; read byte
+        mov bl, al
+        mov bh, 1                       ; run length
+        
+        ; count consecutive bytes
+        .count_run:
+            dec ecx
+            test ecx, ecx
+            jz .write_run
+            
+            cmp byte [esi], bl
+            jne .write_run
+            
+            inc bh
+            inc esi
+            cmp bh, 255
+            jl .count_run
+        
+        .write_run:
+            mov byte [edi], bl          ; write byte value
+            inc edi
+            mov byte [edi], bh          ; write run length
+            inc edi
+            add edx, 2
+            
+            jmp .compress_loop
+    
+    .compress_done:
+        ; update page entry
+        mov eax, ebx
+        sub eax, page_table
+        shr eax, 4
+        
+        mov byte [ebx], PAGE_COMPRESSED
+        mov [ebx + 8], edx              ; compressed_size
+        inc dword [page_stats_compressed]
+        dec dword [page_stats_cold]
+        
+        mov eax, edx                    ; return compressed size
+        jmp .done
+    
+    .failed:
+        xor eax, eax
+    
+    .done:
+        pop edi
+        pop esi
+        pop edx
+        pop ecx
+        pop ebx
+        ret
+
+; get page statistics
+; returns formatted string with page stats
+get_page_stats:
+    pusha
+    
+    mov esi, msg_page_stats
+    call print_string
+    
+    ; memory pressure
+    mov esi, msg_mem_pressure
+    call print_string
+    mov eax, [memory_pressure]
+    cmp eax, 0
+    je .low_pressure
+    cmp eax, 1
+    je .med_pressure
+    mov esi, msg_pressure_high
+    jmp .print_pressure
+    .med_pressure:
+        mov esi, msg_pressure_medium
+        jmp .print_pressure
+    .low_pressure:
+        mov esi, msg_pressure_low
+    .print_pressure:
+        call print_string
+    
+    ; free pages
+    mov esi, msg_free_pages
+    call print_string
+    mov eax, [free_page_count]
+    call print_decimal
+    mov al, '/'
+    call print_char
+    mov eax, PAGE_COUNT
+    call print_decimal
+    mov al, 10
+    call print_char
+    
+    ; hot pages
+    mov esi, msg_page_hot
+    call print_string
+    mov eax, [page_stats_hot]
+    call print_decimal
+    mov al, 10
+    call print_char
+    
+    ; cold pages
+    mov esi, msg_page_cold
+    call print_string
+    mov eax, [page_stats_cold]
+    call print_decimal
+    mov al, 10
+    call print_char
+    
+    ; compressed pages
+    mov esi, msg_page_compressed
+    call print_string
+    mov eax, [page_stats_compressed]
+    call print_decimal
+    mov al, 10
+    call print_char
+    
+    ; swapped pages
+    mov esi, msg_page_swapped
+    call print_string
+    mov eax, [page_stats_swapped]
+    call print_decimal
+    mov al, 10
+    call print_char
+    
+    ; swap activity
+    mov esi, msg_swap_writes
+    call print_string
+    mov eax, [swap_write_count]
+    call print_decimal
+    mov al, 10
+    call print_char
+    
+    mov esi, msg_swap_reads
+    call print_string
+    mov eax, [swap_read_count]
+    call print_decimal
+    mov al, 10
+    call print_char
+    
+    popa
+    ret
+
+msg_page_stats:      db 'Page Statistics:', 10, 0
+msg_mem_pressure:    db '  Memory pressure: ', 0
+msg_pressure_low:    db 'LOW', 10, 0
+msg_pressure_medium: db 'MEDIUM (compressing)', 10, 0
+msg_pressure_high:   db 'HIGH (aggressive compression!)', 10, 0
+msg_free_pages:      db '  Free pages: ', 0
+msg_page_hot:        db '  Hot pages: ', 0
+msg_page_cold:       db '  Cold pages: ', 0
+msg_page_compressed: db '  Compressed pages: ', 0
+msg_page_swapped:    db '  Swapped pages: ', 0
+msg_swap_writes:     db '  Swap writes: ', 0
+msg_swap_reads:      db '  Swap reads: ', 0
+msg_swap_info:       db 'Swap Space Information:', 10, 0
+msg_swap_used:       db '  Used: ', 0
+msg_swap_slots:      db ' slots', 10, 0
+msg_swap_kb:         db '  Size: ', 0
+msg_kb_used:         db ' KB in use', 10, 0
 
 ; ========================================
 ; SYSTEM CALLS - INT 0x80 INTERFACE
@@ -1165,6 +2047,16 @@ irq0_handler:
     
     ; count up
     inc dword [timer_ticks]
+    
+    ; update page aging every 100 ticks
+    mov eax, [timer_ticks]
+    xor edx, edx
+    mov ebx, 100
+    div ebx
+    test edx, edx
+    jnz .no_page_aging
+    call update_page_aging
+    .no_page_aging:
     
     ; do task switching every 10 ticks
     mov eax, [timer_ticks]
@@ -1712,6 +2604,20 @@ process_command:
     test eax, eax
     jz .init_network
     
+    ; is it ":pages"?
+    mov esi, cmd_buffer
+    mov edi, cmd_pages
+    call strcmp
+    test eax, eax
+    jz .show_pages
+    
+    ; is it ":swap"?
+    mov esi, cmd_buffer
+    mov edi, cmd_swap
+    call strcmp
+    test eax, eax
+    jz .show_swap
+    
     ; is it ":say"?
     mov esi, cmd_buffer
     mov edi, cmd_say
@@ -1926,6 +2832,14 @@ process_command:
     
     .init_network:
         call init_rtl8139
+        jmp .done
+    
+    .show_pages:
+        call get_page_stats
+        jmp .done
+    
+    .show_swap:
+        call show_swap_info
         jmp .done
     
     .do_reboot:
@@ -2307,6 +3221,8 @@ msg_help_text:  db 'All commands use : prefix!', 10, 10
                 db '  :syscall - Test system calls', 10
                 db '  :tasks  - Show task info', 10
                 db '  :net    - Initialize network', 10
+                db '  :pages  - Page memory statistics', 10
+                db '  :swap   - Swap space info', 10
                 db '  :say    - Echo your text', 10
                 db '  :reboot - Restart system', 10, 10
                 db 'Files:', 10
@@ -2351,6 +3267,8 @@ cmd_free:       db ':free', 0
 cmd_syscall:    db ':syscall', 0
 cmd_tasks:      db ':tasks', 0
 cmd_net:        db ':net', 0
+cmd_pages:      db ':pages', 0
+cmd_swap:       db ':swap', 0
 cmd_say:        db ':say ', 0
 
 msg_year_prefix: db '20', 0
