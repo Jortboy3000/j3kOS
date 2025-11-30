@@ -2579,21 +2579,46 @@ process_command:
     cmp dword [cmd_length], 0
     je .done
     
-    ; all commands must start with ':'
+    ; normalize command - allow with or without colon
     mov al, [cmd_buffer]
     cmp al, ':'
-    jne .no_colon
+    je .has_colon
     
-    ; is it ":help"?
+    ; shift buffer right to add colon at start
+    mov ecx, [cmd_length]
+    inc ecx
+    mov esi, cmd_buffer
+    add esi, ecx
+    mov edi, esi
+    dec edi
+    .shift_loop:
+        mov al, [esi]
+        mov [edi], al
+        dec esi
+        dec edi
+        dec ecx
+        jnz .shift_loop
+    mov byte [cmd_buffer], ':'
+    inc dword [cmd_length]
+    
+    .has_colon:
+    
+    ; is it ":help"? (or just "help")
     mov esi, cmd_buffer
     mov edi, cmd_help
     call strcmp
     test eax, eax
     jz .show_help
     
-    ; is it ":clear"?
+    ; is it ":clear" or "cls"?
     mov esi, cmd_buffer
     mov edi, cmd_clear
+    call strcmp
+    test eax, eax
+    jz .do_clear
+    
+    mov esi, cmd_buffer
+    mov edi, cmd_cls
     call strcmp
     test eax, eax
     jz .do_clear
@@ -2760,7 +2785,7 @@ process_command:
     test eax, eax
     jz .do_mount
     
-    ; :list or :show
+    ; :list or :show or :ls
     mov esi, cmd_buffer
     mov edi, cmd_list
     mov ecx, 5
@@ -2771,6 +2796,13 @@ process_command:
     mov esi, cmd_buffer
     mov edi, cmd_show
     mov ecx, 5
+    call strncmp
+    test eax, eax
+    jz .fs_list
+    
+    mov esi, cmd_buffer
+    mov edi, cmd_ls
+    mov ecx, 3
     call strncmp
     test eax, eax
     jz .fs_list
@@ -2790,7 +2822,7 @@ process_command:
     test eax, eax
     jz .fs_create
     
-    ; :read or :open
+    ; :read or :open or :cat
     mov esi, cmd_buffer
     mov edi, cmd_read
     mov ecx, 6
@@ -2805,6 +2837,13 @@ process_command:
     test eax, eax
     jz .fs_read
     
+    mov esi, cmd_buffer
+    mov edi, cmd_cat
+    mov ecx, 5
+    call strncmp
+    test eax, eax
+    jz .fs_read
+    
     ; :write
     mov esi, cmd_buffer
     mov edi, cmd_write
@@ -2813,7 +2852,7 @@ process_command:
     test eax, eax
     jz .fs_write
     
-    ; :delete or :remove
+    ; :delete or :remove or :del or :rm
     mov esi, cmd_buffer
     mov edi, cmd_delete
     mov ecx, 8
@@ -2828,14 +2867,24 @@ process_command:
     test eax, eax
     jz .fs_delete
     
-    ; unknown command with colon
+    mov esi, cmd_buffer
+    mov edi, cmd_del
+    mov ecx, 5
+    call strncmp
+    test eax, eax
+    jz .fs_delete
+    
+    mov esi, cmd_buffer
+    mov edi, cmd_rm
+    mov ecx, 4
+    call strncmp
+    test eax, eax
+    jz .fs_delete
+    
+    ; unknown command
     mov esi, msg_unknown
     call print_string
     jmp .done
-    
-    .no_colon:
-        mov esi, msg_need_colon
-        call print_string
         jmp .done
     
     .show_help:
@@ -3373,43 +3422,40 @@ strcmp_simple:
 ; ========================================
 msg_boot:       db 'j3kOS 32-bit Protected Mode', 10
                 db 'by Jortboy3k (@jortboy3k)', 10, 10, 0
-msg_ready:      db 'System ready. Type ":help" for commands.', 10, 10, 0
+msg_ready:      db 'System ready. Type "help" for commands.', 10, 10, 0
 msg_prompt:     db '> ', 0
-msg_unknown:    db 'Unknown command. Type ":help" for list.', 10, 0
-msg_need_colon: db 'Commands need a : prefix! Try ":help"', 10, 0
-msg_help_text:  db 'All commands use : prefix!', 10, 10
-                db '  :help   - Show this help', 10
-                db '  :clear  - Clear screen', 10
-                db '  :time   - Show timer ticks', 10
-                db '  :mem    - Memory info', 10
-                db '  :ver    - OS version', 10
-                db '  :datetime - Current date/time', 10
-                db '  :timezone [+/-n] - Set/show timezone', 10
-                db '  :pci    - Scan PCI bus', 10
-                db '  :malloc - Test memory allocation', 10
-                db '  :syscall - Test system calls', 10
-                db '  :tasks  - Show task info', 10
-                db '  :net    - Initialize network', 10
-                db '  :netstats - Network statistics', 10
-                db '  :ping   - Ping gateway (10.0.2.1)', 10
-                db '  :pages  - Page memory statistics', 10
-                db '  :swap   - Swap space info', 10
-                db '  :gfx    - Switch to graphics mode', 10
-                db '  :gui    - GUI demo with mouse', 10
-                db '  :text   - Return to text mode', 10
-                db '  :format - Format disk with J3KFS', 10
-                db '  :mount  - Mount J3KFS file system', 10
-                db '  :say    - Echo your text', 10
-                db '  :reboot - Restart system', 10, 10
-                db 'Files:', 10
-                db '  :list or :show     - List files', 10
-                db '  :make <name>       - Create file', 10
-                db '  :create <name>     - Create file', 10
-                db '  :read <name>       - Read file', 10
-                db '  :open <name>       - Read file', 10
-                db '  :write <name> <text> - Write to file', 10
-                db '  :delete <name>     - Delete file', 10
-                db '  :remove <name>     - Delete file', 10, 0
+msg_unknown:    db 'Unknown command. Type "help" for list.', 10, 0
+msg_help_text:  db 'j3kOS Commands (: prefix optional):', 10, 10
+                db 'System:', 10
+                db '  help           - Show this help', 10
+                db '  clear, cls     - Clear screen', 10
+                db '  ver            - Show version', 10
+                db '  reboot         - Reboot system', 10, 10
+                db 'Info:', 10
+                db '  time           - Show system time', 10
+                db '  datetime       - Show date and time', 10
+                db '  mem            - Show memory usage', 10
+                db '  pci            - Scan PCI devices', 10, 10
+                db 'Graphics:', 10
+                db '  gfx            - Graphics mode demo', 10
+                db '  gui            - GUI with mouse', 10
+                db '  text           - Return to text mode', 10, 10
+                db 'Network:', 10
+                db '  net            - Initialize network', 10
+                db '  netstats       - Show network info', 10
+                db '  ping <ip>      - Ping an IP address', 10, 10
+                db 'File System:', 10
+                db '  format         - Format disk', 10
+                db '  mount          - Mount filesystem', 10
+                db '  ls, list, show - List files', 10
+                db '  read, cat, open <file> - Read file', 10
+                db '  write <file> <text> - Write file', 10
+                db '  del, delete, rm <file> - Delete file', 10, 10
+                db 'Advanced:', 10
+                db '  pages          - Page management', 10
+                db '  swap           - Swap info', 10
+                db '  tasks          - Task list', 10
+                db '  say <text>     - Echo with delay', 10, 0
 msg_time_text:  db 'Timer ticks: 0x', 0
 msg_mem_text:   db 'Memory: 32MB (0x00000000 - 0x02000000)', 10
                 db 'Kernel at 0x10000, Stack at 0x90000', 10, 0
@@ -3472,6 +3518,8 @@ msg_current_task: db '  Current task: ', 0
 ; file system commands
 cmd_list:       db ':list', 0
 cmd_show:       db ':show', 0
+cmd_ls:         db ':ls', 0
+cmd_cat:        db ':cat ', 0
 cmd_make:       db ':make ', 0
 cmd_create:     db ':create ', 0
 cmd_read:       db ':read ', 0
@@ -3479,6 +3527,9 @@ cmd_open:       db ':open ', 0
 cmd_write:      db ':write ', 0
 cmd_delete:     db ':delete ', 0
 cmd_remove:     db ':remove ', 0
+cmd_del:        db ':del ', 0
+cmd_rm:         db ':rm ', 0
+cmd_cls:        db ':cls', 0
 
 ; IDT
 align 16
