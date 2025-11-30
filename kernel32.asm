@@ -2805,6 +2805,14 @@ process_command:
     test eax, eax
     jz .fs_read
     
+    ; :write
+    mov esi, cmd_buffer
+    mov edi, cmd_write
+    mov ecx, 7
+    call strncmp
+    test eax, eax
+    jz .fs_write
+    
     ; :delete or :remove
     mov esi, cmd_buffer
     mov edi, cmd_delete
@@ -3101,84 +3109,32 @@ process_command:
         jmp .done
     
     .fs_list:
-        mov esi, msg_fs_list_header
-        call print_string
-        
-        ; list all files
-        mov ecx, [file_count]
-        test ecx, ecx
-        jz .fs_list_empty
-        
-        xor ebx, ebx
-        .fs_list_loop:
-            cmp ebx, ecx
-            jge .fs_list_done
-            
-            ; print filename
-            mov esi, msg_fs_bullet
-            call print_string
-            
-            ; calculate file entry address
-            mov eax, ebx
-            imul eax, 32        ; each file entry is 32 bytes
-            lea esi, [file_table + eax]
-            
-            call print_string
-            mov al, 10
-            call print_char
-            
-            inc ebx
-            jmp .fs_list_loop
-        
-        .fs_list_empty:
-            mov esi, msg_fs_no_files
-            call print_string
-        
-        .fs_list_done:
-            jmp .done
+        ; list J3KFS directory
+        mov eax, [current_dir_inode]
+        call list_directory
+        jmp .done
     
     .fs_create:
         ; check if filename provided
         cmp dword [cmd_length], 7
         jle .fs_create_no_name
         
-        ; check if we have space
-        mov eax, [file_count]
-        cmp eax, MAX_FILES
-        jge .fs_create_full
-        
         ; get filename (skip ":make " or ":create ")
         mov esi, cmd_buffer
         add esi, 6
         cmp byte [cmd_buffer + 1], 'c'  ; :create is longer
-        jne .fs_create_copy
+        jne .fs_create_go
         add esi, 2  ; skip 2 more chars
         
-        .fs_create_copy:
-            ; copy filename to file table
-            mov eax, [file_count]
-            imul eax, 32
-            lea edi, [file_table + eax]
+        .fs_create_go:
+            ; create file in J3KFS
+            call create_file
+            cmp eax, -1
+            je .fs_create_full
             
-            mov ecx, 16  ; max filename length
-            .fs_create_copy_loop:
-                lodsb
-                test al, al
-                jz .fs_create_copy_done
-                cmp al, ' '
-                je .fs_create_copy_done
-                stosb
-                loop .fs_create_copy_loop
-            
-            .fs_create_copy_done:
-                xor al, al
-                stosb
-                
-                inc dword [file_count]
-                
-                mov esi, msg_fs_created
-                call print_string
-                jmp .done
+            mov esi, msg_file_created
+            call print_string
+            jmp .done
         
         .fs_create_no_name:
             mov esi, msg_fs_need_name
@@ -3195,51 +3151,35 @@ process_command:
         cmp dword [cmd_length], 6
         jle .fs_read_no_name
         
-        ; get filename
+        ; get filename (skip ":read " or ":open ")
         mov esi, cmd_buffer
         add esi, 6
         
-        ; search for file
-        mov ecx, [file_count]
-        xor ebx, ebx
+        ; find file in J3KFS
+        mov eax, [current_dir_inode]
+        mov ebx, esi
+        call find_dir_entry
+        cmp eax, -1
+        je .fs_read_not_found
         
-        .fs_read_search:
-            cmp ebx, ecx
-            jge .fs_read_not_found
-            
-            ; compare filename
-            mov eax, ebx
-            imul eax, 32
-            lea edi, [file_table + eax]
-            
-            push esi
-            push edi
-            call strcmp_simple
-            pop edi
-            pop esi
-            
-            test eax, eax
-            jz .fs_read_found
-            
-            inc ebx
-            jmp .fs_read_search
+        ; read file content
+        mov edi, file_read_buffer
+        mov ecx, 4096
+        call read_file
         
-        .fs_read_found:
-            mov esi, msg_fs_reading
-            call print_string
-            
-            ; print filename
-            mov eax, ebx
-            imul eax, 32
-            lea esi, [file_table + eax]
-            call print_string
-            
-            mov esi, msg_fs_content
-            call print_string
-            jmp .done
+        ; print content
+        mov esi, msg_file_reading
+        call print_string
+        
+        mov esi, file_read_buffer
+        call print_string
+        
+        mov al, 10
+        call print_char
+        jmp .done
         
         .fs_read_not_found:
-            mov esi, msg_fs_not_found
+            mov esi, msg_file_not_found
             call print_string
             jmp .done
         
@@ -3248,65 +3188,108 @@ process_command:
             call print_string
             jmp .done
     
+    .fs_write:
+        ; check if filename provided
+        cmp dword [cmd_length], 8
+        jle .fs_write_no_name
+        
+        ; parse ":write <filename> <text>"
+        mov esi, cmd_buffer
+        add esi, 7          ; skip ":write "
+        
+        ; find space to get filename
+        mov edi, file_read_buffer
+        mov ecx, 64
+        .fs_write_copy_name:
+            lodsb
+            cmp al, ' '
+            je .fs_write_got_name
+            test al, al
+            jz .fs_write_no_text
+            stosb
+            loop .fs_write_copy_name
+        
+        .fs_write_got_name:
+            xor al, al
+            stosb
+            
+            ; now esi points to the text to write
+            mov [.text_ptr], esi
+            
+            ; calculate text length
+            mov edi, esi
+            xor ecx, ecx
+            .fs_write_len:
+                mov al, [edi]
+                test al, al
+                jz .fs_write_len_done
+                inc ecx
+                inc edi
+                jmp .fs_write_len
+            
+            .fs_write_len_done:
+            mov [.text_len], ecx
+            
+            ; find or create file
+            mov eax, [current_dir_inode]
+            mov ebx, file_read_buffer
+            call find_dir_entry
+            cmp eax, -1
+            jne .fs_write_exists
+            
+            ; create new file
+            mov esi, file_read_buffer
+            call create_file
+            cmp eax, -1
+            je .fs_write_failed
+            
+            .fs_write_exists:
+            ; write data to file
+            mov esi, [.text_ptr]
+            mov ecx, [.text_len]
+            call write_file
+            
+            mov esi, msg_file_written
+            call print_string
+            call print_hex
+            mov esi, msg_bytes_written
+            call print_string
+            jmp .done
+        
+        .fs_write_no_text:
+        .fs_write_no_name:
+            mov esi, msg_fs_need_name
+            call print_string
+            jmp .done
+        
+        .fs_write_failed:
+            mov esi, msg_fs_full
+            call print_string
+            jmp .done
+        
+        .text_ptr: dd 0
+        .text_len: dd 0
+    
     .fs_delete:
         ; check if filename provided
         cmp dword [cmd_length], 8
         jle .fs_delete_no_name
         
-        ; get filename
+        ; get filename (skip ":delete " or ":remove ")
         mov esi, cmd_buffer
         add esi, 8
         
-        ; search for file
-        mov ecx, [file_count]
-        xor ebx, ebx
+        ; delete file from J3KFS
+        call delete_file
+        cmp eax, -1
+        je .fs_delete_not_found
         
-        .fs_delete_search:
-            cmp ebx, ecx
-            jge .fs_delete_not_found
-            
-            ; compare filename
-            mov eax, ebx
-            imul eax, 32
-            lea edi, [file_table + eax]
-            
-            push esi
-            push edi
-            call strcmp_simple
-            pop edi
-            pop esi
-            
-            test eax, eax
-            jz .fs_delete_found
-            
-            inc ebx
-            jmp .fs_delete_search
-        
-        .fs_delete_found:
-            ; shift all entries down
-            mov eax, ebx
-            imul eax, 32
-            lea edi, [file_table + eax]
-            lea esi, [file_table + eax + 32]
-            
-            mov ecx, [file_count]
-            sub ecx, ebx
-            dec ecx
-            imul ecx, 32
-            
-            test ecx, ecx
-            jz .fs_delete_no_shift
-            
-            rep movsb
-            
-            .fs_delete_no_shift:
-                dec dword [file_count]
-                mov esi, msg_fs_deleted
-                call print_string
-                jmp .done
+        mov esi, msg_file_deleted
+        call print_string
+        jmp .done
         
         .fs_delete_not_found:
-            mov esi, msg_fs_not_found
+            mov esi, msg_file_not_found
             call print_string
             jmp .done
         
@@ -3424,6 +3407,7 @@ msg_help_text:  db 'All commands use : prefix!', 10, 10
                 db '  :create <name>     - Create file', 10
                 db '  :read <name>       - Read file', 10
                 db '  :open <name>       - Read file', 10
+                db '  :write <name> <text> - Write to file', 10
                 db '  :delete <name>     - Delete file', 10
                 db '  :remove <name>     - Delete file', 10, 0
 msg_time_text:  db 'Timer ticks: 0x', 0
@@ -3492,6 +3476,7 @@ cmd_make:       db ':make ', 0
 cmd_create:     db ':create ', 0
 cmd_read:       db ':read ', 0
 cmd_open:       db ':open ', 0
+cmd_write:      db ':write ', 0
 cmd_delete:     db ':delete ', 0
 cmd_remove:     db ':remove ', 0
 
@@ -3514,3 +3499,4 @@ MAX_FILES equ 16
 
 file_count: dd 0
 file_table: times (MAX_FILES * 32) db 0  ; 16 files, 32 bytes each (16 for name, 16 reserved)
+file_read_buffer: times 4096 db 0        ; buffer for reading files

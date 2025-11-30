@@ -508,8 +508,11 @@ create_file:
     
     mov [.inode], eax
     
-    ; TODO: add directory entry for this file
-    ; (for now we'll skip directory management and just return inode)
+    ; add directory entry to current directory
+    mov eax, [current_dir_inode]
+    mov ebx, [.inode]
+    mov ecx, esi
+    call add_dir_entry
     
     popa
     mov eax, [.inode]
@@ -523,14 +526,565 @@ create_file:
     .inode: dd 0
 
 ; delete a file
-; EAX = inode number
+; ESI = filename
+; returns: EAX = 0 on success, -1 on error
 delete_file:
     pusha
     
+    ; find file in current directory
+    mov eax, [current_dir_inode]
+    mov ebx, esi
+    call find_dir_entry
+    cmp eax, -1
+    je .failed
+    
+    mov [.inode], eax
+    
+    ; remove directory entry
+    mov eax, [current_dir_inode]
+    mov ebx, esi
+    call remove_dir_entry
+    
+    ; free the inode
+    mov eax, [.inode]
     call free_inode
     
     popa
+    xor eax, eax
     ret
+    
+    .failed:
+    popa
+    mov eax, -1
+    ret
+    
+    .inode: dd 0
+
+; write data to file
+; EAX = inode number
+; ESI = data buffer
+; ECX = size in bytes
+; returns: EAX = bytes written
+write_file:
+    pusha
+    
+    mov [.inode_num], eax
+    mov [.buffer], esi
+    mov [.size], ecx
+    mov dword [.written], 0
+    
+    ; read inode
+    mov eax, [.inode_num]
+    call read_inode
+    
+    mov edi, disk_buffer
+    
+    ; calculate how many blocks we need
+    mov eax, [.size]
+    add eax, 511
+    shr eax, 9          ; divide by 512
+    mov [.blocks_needed], eax
+    
+    cmp eax, MAX_FILE_BLOCKS
+    jg .too_big
+    
+    ; allocate blocks and write data
+    mov dword [.block_idx], 0
+    
+    .write_loop:
+        mov eax, [.block_idx]
+        cmp eax, [.blocks_needed]
+        jge .write_done
+        
+        ; allocate a data block
+        push edi
+        call alloc_data_block
+        pop edi
+        cmp eax, -1
+        je .write_done
+        
+        ; store block number in inode
+        mov ebx, [.block_idx]
+        mov [edi + 18 + ebx * 4], eax
+        
+        ; calculate how much to write
+        mov ecx, 512
+        mov eax, [.size]
+        sub eax, [.written]
+        cmp eax, 512
+        jge .write_full_block
+        mov ecx, eax
+        
+        .write_full_block:
+        ; copy data to temp buffer
+        push edi
+        mov edi, temp_block
+        mov esi, [.buffer]
+        add esi, [.written]
+        rep movsb
+        pop edi
+        
+        ; write block to disk
+        push edi
+        mov ebx, [.block_idx]
+        mov eax, [edi + 18 + ebx * 4]
+        add eax, DATA_START_SECTOR
+        mov ebx, temp_block
+        call write_sector
+        pop edi
+        
+        ; update written count
+        add [.written], ecx
+        inc dword [.block_idx]
+        jmp .write_loop
+    
+    .write_done:
+    ; update inode size and block count
+    mov eax, [.size]
+    mov [edi + 2], eax
+    mov eax, [.blocks_needed]
+    mov [edi + 6], eax
+    
+    ; write inode back
+    mov eax, [.inode_num]
+    call write_inode
+    
+    popa
+    mov eax, [.written]
+    ret
+    
+    .too_big:
+    popa
+    xor eax, eax
+    ret
+    
+    .inode_num: dd 0
+    .buffer: dd 0
+    .size: dd 0
+    .blocks_needed: dd 0
+    .block_idx: dd 0
+    .written: dd 0
+
+; read data from file
+; EAX = inode number
+; EDI = destination buffer
+; ECX = max bytes to read
+; returns: EAX = bytes read
+read_file:
+    pusha
+    
+    mov [.inode_num], eax
+    mov [.dest], edi
+    mov [.max_size], ecx
+    mov dword [.bytes_read], 0
+    
+    ; read inode
+    mov eax, [.inode_num]
+    call read_inode
+    
+    mov esi, disk_buffer
+    
+    ; get file size
+    mov eax, [esi + 2]
+    mov [.file_size], eax
+    
+    ; get block count
+    mov eax, [esi + 6]
+    mov [.block_count], eax
+    
+    ; read blocks
+    mov dword [.block_idx], 0
+    
+    .read_loop:
+        mov eax, [.block_idx]
+        cmp eax, [.block_count]
+        jge .read_done
+        
+        ; get block number
+        mov ebx, [.block_idx]
+        mov eax, [esi + 18 + ebx * 4]
+        test eax, eax
+        jz .read_done
+        
+        ; read block from disk
+        add eax, DATA_START_SECTOR
+        push esi
+        mov ebx, temp_block
+        call read_sector
+        pop esi
+        
+        ; copy to destination
+        mov ecx, 512
+        mov eax, [.file_size]
+        sub eax, [.bytes_read]
+        cmp eax, 512
+        jge .copy_full
+        mov ecx, eax
+        
+        .copy_full:
+        push esi
+        mov esi, temp_block
+        mov edi, [.dest]
+        add edi, [.bytes_read]
+        rep movsb
+        pop esi
+        
+        add [.bytes_read], ecx
+        inc dword [.block_idx]
+        
+        ; check if we hit max size
+        mov eax, [.bytes_read]
+        cmp eax, [.max_size]
+        jge .read_done
+        
+        jmp .read_loop
+    
+    .read_done:
+    popa
+    mov eax, [.bytes_read]
+    ret
+    
+    .inode_num: dd 0
+    .dest: dd 0
+    .max_size: dd 0
+    .file_size: dd 0
+    .block_count: dd 0
+    .block_idx: dd 0
+    .bytes_read: dd 0
+
+temp_block: times 512 db 0
+
+; ========================================
+; DIRECTORY OPERATIONS
+; ========================================
+
+; add entry to directory
+; EAX = directory inode number
+; EBX = file inode number
+; ECX = filename pointer
+; returns: EAX = 0 on success, -1 on error
+add_dir_entry:
+    pusha
+    
+    mov [.dir_inode], eax
+    mov [.file_inode], ebx
+    mov [.filename], ecx
+    
+    ; read directory inode
+    mov eax, [.dir_inode]
+    call read_inode
+    
+    mov esi, disk_buffer
+    
+    ; get current size
+    mov eax, [esi + 2]
+    mov [.dir_size], eax
+    
+    ; calculate which block to add to
+    mov eax, [.dir_size]
+    shr eax, 9          ; divide by 512
+    mov [.block_idx], eax
+    
+    cmp eax, MAX_FILE_BLOCKS
+    jge .failed
+    
+    ; check if we need a new block
+    mov eax, [.dir_size]
+    and eax, 511
+    test eax, eax
+    jnz .have_block
+    
+    ; allocate new block
+    push esi
+    call alloc_data_block
+    pop esi
+    cmp eax, -1
+    je .failed
+    
+    mov ebx, [.block_idx]
+    mov [esi + 18 + ebx * 4], eax
+    
+    ; update block count
+    mov eax, [esi + 6]
+    inc eax
+    mov [esi + 6], eax
+    
+    .have_block:
+    ; get block number
+    mov ebx, [.block_idx]
+    mov eax, [esi + 18 + ebx * 4]
+    add eax, DATA_START_SECTOR
+    
+    ; read the block
+    push esi
+    mov ebx, temp_block
+    call read_sector
+    pop esi
+    
+    ; calculate offset within block
+    mov eax, [.dir_size]
+    and eax, 511
+    
+    ; write directory entry
+    mov edi, temp_block
+    add edi, eax
+    
+    ; write inode number
+    mov eax, [.file_inode]
+    mov [edi], eax
+    
+    ; copy filename
+    mov ecx, MAX_FILENAME
+    mov esi, [.filename]
+    add edi, 4
+    
+    .copy_name:
+        lodsb
+        stosb
+        test al, al
+        jz .name_done
+        loop .copy_name
+    
+    .name_done:
+    ; write block back
+    mov esi, disk_buffer
+    mov ebx, [.block_idx]
+    mov eax, [esi + 18 + ebx * 4]
+    add eax, DATA_START_SECTOR
+    push esi
+    mov ebx, temp_block
+    call write_sector
+    pop esi
+    
+    ; update directory size
+    add dword [esi + 2], 32
+    
+    ; write inode back
+    mov eax, [.dir_inode]
+    call write_inode
+    
+    popa
+    xor eax, eax
+    ret
+    
+    .failed:
+    popa
+    mov eax, -1
+    ret
+    
+    .dir_inode: dd 0
+    .file_inode: dd 0
+    .filename: dd 0
+    .dir_size: dd 0
+    .block_idx: dd 0
+
+; find file in directory
+; EAX = directory inode number
+; EBX = filename pointer
+; returns: EAX = file inode number (or -1 if not found)
+find_dir_entry:
+    pusha
+    
+    mov [.dir_inode], eax
+    mov [.filename], ebx
+    mov dword [.result], -1
+    
+    ; read directory inode
+    mov eax, [.dir_inode]
+    call read_inode
+    
+    mov esi, disk_buffer
+    
+    ; get directory size
+    mov eax, [esi + 2]
+    mov [.dir_size], eax
+    
+    ; calculate number of entries
+    shr eax, 5          ; divide by 32
+    mov [.entry_count], eax
+    
+    test eax, eax
+    jz .done
+    
+    ; scan entries
+    mov dword [.entry_idx], 0
+    
+    .scan_loop:
+        mov eax, [.entry_idx]
+        cmp eax, [.entry_count]
+        jge .done
+        
+        ; calculate which block
+        mov eax, [.entry_idx]
+        shl eax, 5          ; multiply by 32
+        shr eax, 9          ; divide by 512
+        mov [.block_idx], eax
+        
+        ; get block number
+        mov ebx, [.block_idx]
+        mov eax, [esi + 18 + ebx * 4]
+        add eax, DATA_START_SECTOR
+        
+        ; read block
+        push esi
+        mov ebx, temp_block
+        call read_sector
+        pop esi
+        
+        ; calculate offset in block
+        mov eax, [.entry_idx]
+        shl eax, 5
+        and eax, 511
+        
+        ; compare filename
+        mov edi, temp_block
+        add edi, eax
+        add edi, 4          ; skip inode number
+        
+        mov esi, [.filename]
+        mov ecx, MAX_FILENAME
+        
+        .compare:
+            lodsb
+            mov bl, [edi]
+            inc edi
+            cmp al, bl
+            jne .not_match
+            test al, al
+            jz .match
+            loop .compare
+        
+        .match:
+        ; found it! get inode number
+        mov eax, [.entry_idx]
+        shl eax, 5
+        and eax, 511
+        mov edi, temp_block
+        add edi, eax
+        mov eax, [edi]
+        mov [.result], eax
+        jmp .done
+        
+        .not_match:
+        mov esi, disk_buffer
+        inc dword [.entry_idx]
+        jmp .scan_loop
+    
+    .done:
+    popa
+    mov eax, [.result]
+    ret
+    
+    .dir_inode: dd 0
+    .filename: dd 0
+    .dir_size: dd 0
+    .entry_count: dd 0
+    .entry_idx: dd 0
+    .block_idx: dd 0
+    .result: dd 0
+
+; remove entry from directory
+; EAX = directory inode number
+; EBX = filename pointer
+; returns: EAX = 0 on success, -1 on error
+remove_dir_entry:
+    pusha
+    
+    ; TODO: implement proper removal
+    ; for now just return success
+    
+    popa
+    xor eax, eax
+    ret
+
+; list directory contents
+; EAX = directory inode number
+list_directory:
+    pusha
+    
+    mov [.dir_inode], eax
+    
+    ; read directory inode
+    call read_inode
+    
+    mov esi, disk_buffer
+    
+    ; get directory size
+    mov eax, [esi + 2]
+    mov [.dir_size], eax
+    
+    ; calculate number of entries
+    shr eax, 5
+    mov [.entry_count], eax
+    
+    test eax, eax
+    jz .empty
+    
+    ; print header
+    mov esi, msg_dir_listing
+    call print_string
+    
+    ; scan entries
+    mov dword [.entry_idx], 0
+    mov esi, disk_buffer
+    
+    .list_loop:
+        mov eax, [.entry_idx]
+        cmp eax, [.entry_count]
+        jge .done
+        
+        ; calculate which block
+        mov eax, [.entry_idx]
+        shl eax, 5
+        shr eax, 9
+        mov [.block_idx], eax
+        
+        ; get block number
+        mov ebx, [.block_idx]
+        mov eax, [esi + 18 + ebx * 4]
+        add eax, DATA_START_SECTOR
+        
+        ; read block
+        push esi
+        mov ebx, temp_block
+        call read_sector
+        pop esi
+        
+        ; calculate offset
+        mov eax, [.entry_idx]
+        shl eax, 5
+        and eax, 511
+        
+        ; print entry
+        push esi
+        mov esi, msg_dir_bullet
+        call print_string
+        
+        mov esi, temp_block
+        add esi, eax
+        add esi, 4          ; skip inode, point to name
+        call print_string
+        
+        mov al, 10
+        call print_char
+        pop esi
+        
+        inc dword [.entry_idx]
+        jmp .list_loop
+    
+    .empty:
+    mov esi, msg_dir_empty
+    call print_string
+    
+    .done:
+    popa
+    ret
+    
+    .dir_inode: dd 0
+    .dir_size: dd 0
+    .entry_count: dd 0
+    .entry_idx: dd 0
+    .block_idx: dd 0
 
 ; ========================================
 ; DISK I/O
@@ -601,3 +1155,12 @@ write_sector:
 msg_fs_mounted:     db 'J3KFS mounted successfully!', 10, 0
 msg_fs_invalid:     db 'Invalid file system! Use :format to create J3KFS.', 10, 0
 msg_fs_formatted:   db 'Disk formatted with J3KFS!', 10, 0
+msg_dir_listing:    db 'Directory contents:', 10, 0
+msg_dir_bullet:     db '  - ', 0
+msg_dir_empty:      db '  (empty directory)', 10, 0
+msg_file_created:   db 'File created!', 10, 0
+msg_file_written:   db 'File written: ', 0
+msg_bytes_written:  db ' bytes', 10, 0
+msg_file_deleted:   db 'File deleted!', 10, 0
+msg_file_not_found: db 'File not found!', 10, 0
+msg_file_reading:   db 'Reading file...', 10, 0
