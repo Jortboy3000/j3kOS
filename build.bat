@@ -28,10 +28,10 @@ nasm -f bin loader.asm -o loader.bin || exit /b 1
 echo Building kernel...
 nasm -f bin kernel32.asm -o kernel32.bin || exit /b 1
 
-REM Pad kernel to 40KB
+REM Pad kernel to 60KB
 echo.
 echo Padding kernel...
-powershell -Command "$bytes = [IO.File]::ReadAllBytes('kernel32.bin'); $pad = New-Object byte[] 40960; [Array]::Copy($bytes, $pad, [Math]::Min($bytes.Length, 40960)); [IO.File]::WriteAllBytes('kernel32.bin', $pad)"
+powershell -Command "$bytes = [IO.File]::ReadAllBytes('kernel32.bin'); $pad = New-Object byte[] 61440; [Array]::Copy($bytes, $pad, [Math]::Min($bytes.Length, 61440)); [IO.File]::WriteAllBytes('kernel32.bin', $pad)"
 
 REM Create image
 echo Creating disk image...
