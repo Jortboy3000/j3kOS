@@ -207,6 +207,13 @@ init_idt:
     shr eax, 16
     mov [edi+6], ax
     
+    ; PS/2 mouse on IRQ12 (INT 0x2C)
+    mov edi, idt_table + (0x2C * 8)
+    mov eax, irq12_handler
+    mov [edi], ax
+    shr eax, 16
+    mov [edi+6], ax
+    
     ; system call on INT 0x80
     mov edi, idt_table + (0x80 * 8)
     mov eax, syscall_handler
@@ -249,10 +256,10 @@ init_pic:
     out 0x21, al
     out 0xA1, al
     
-    ; enable timer, keyboard, and IRQ11 (network)
+    ; enable timer, keyboard, IRQ11 (network), and IRQ12 (mouse)
     mov al, 0xFC        ; IRQ0 and IRQ1 enabled
     out 0x21, al
-    mov al, 0xF7        ; IRQ11 enabled (bit 3 = 0)
+    mov al, 0xF3        ; IRQ11 and IRQ12 enabled (bits 3 and 4 = 0)
     out 0xA1, al
     ret
 
@@ -1597,6 +1604,7 @@ swap_page_in:
 %include "swap_system.asm"
 %include "network.asm"
 %include "graphics.asm"
+%include "gui.asm"
 
 ; compress multiple cold pages (for memory pressure)
 compress_cold_pages:
@@ -2282,6 +2290,26 @@ irq11_handler:
     
     ; tell both PICs we're done (IRQ11 is on slave PIC)
     mov al, 0x20
+    out 0xA0, al
+    out 0x20, al
+    
+    popa
+    iret
+
+; IRQ12 handler (PS/2 mouse)
+irq12_handler:
+    pusha
+    
+    ; update mouse state
+    call mouse_update
+    
+    ; tell both PICs we're done (IRQ12 is on slave PIC)
+    mov al, 0x20
+    out 0xA0, al
+    out 0x20, al
+    
+    popa
+    iret
     out 0xA0, al            ; Slave PIC
     out 0x20, al            ; Master PIC
     
@@ -2683,6 +2711,14 @@ process_command:
     test eax, eax
     jz .do_gfx
     
+    ; is it ":gui"?
+    mov esi, cmd_buffer
+    mov edi, cmd_gui
+    mov ecx, 4
+    call strncmp
+    test eax, eax
+    jz .do_gui
+    
     ; is it ":text"?
     mov esi, cmd_buffer
     mov edi, cmd_text
@@ -2933,6 +2969,13 @@ process_command:
         ; switch to graphics mode
         call set_graphics_mode
         call graphics_demo
+        jmp .done
+    
+    .do_gui:
+        ; GUI demo with mouse support
+        call set_graphics_mode
+        call init_mouse
+        call gui_demo
         jmp .done
     
     .do_text:
@@ -3338,6 +3381,7 @@ msg_help_text:  db 'All commands use : prefix!', 10, 10
                 db '  :pages  - Page memory statistics', 10
                 db '  :swap   - Swap space info', 10
                 db '  :gfx    - Switch to graphics mode', 10
+                db '  :gui    - GUI demo with mouse', 10
                 db '  :text   - Return to text mode', 10
                 db '  :say    - Echo your text', 10
                 db '  :reboot - Restart system', 10, 10
@@ -3390,6 +3434,7 @@ cmd_swap:       db ':swap', 0
 cmd_netstats:   db ':netstats', 0
 cmd_ping:       db ':ping', 0
 cmd_gfx:        db ':gfx', 0
+cmd_gui:        db ':gui', 0
 cmd_text:       db ':text', 0
 cmd_say:        db ':say ', 0
 
