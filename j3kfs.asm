@@ -1092,61 +1092,177 @@ list_directory:
 
 disk_buffer:        times 512 db 0
 
+; ========================================
+; DISK I/O (ATA PIO MODE)
+; ========================================
+
+; ATA PIO ports (primary controller)
+ATA_DATA         equ 0x1F0
+ATA_ERROR        equ 0x1F1
+ATA_SECTOR_COUNT equ 0x1F2
+ATA_LBA_LOW      equ 0x1F3
+ATA_LBA_MID      equ 0x1F4
+ATA_LBA_HIGH     equ 0x1F5
+ATA_DRIVE_HEAD   equ 0x1F6
+ATA_STATUS       equ 0x1F7
+ATA_COMMAND      equ 0x1F7
+
+; ATA commands
+ATA_CMD_READ     equ 0x20
+ATA_CMD_WRITE    equ 0x30
+
+; ATA status bits
+ATA_SR_BSY       equ 0x80    ; Busy
+ATA_SR_DRDY      equ 0x40    ; Drive ready
+ATA_SR_DRQ       equ 0x08    ; Data request ready
+ATA_SR_ERR       equ 0x01    ; Error
+
+; wait for ATA drive to be ready
+ata_wait_ready:
+    pusha
+    .wait:
+        mov dx, ATA_STATUS
+        in al, dx
+        test al, ATA_SR_BSY
+        jnz .wait
+    popa
+    ret
+
+; wait for data request
+ata_wait_drq:
+    pusha
+    .wait:
+        mov dx, ATA_STATUS
+        in al, dx
+        test al, ATA_SR_DRQ
+        jz .wait
+    popa
+    ret
+
 ; read sector from disk
-; EAX = sector number
+; EAX = sector number (LBA)
 ; EBX = buffer address
 read_sector:
     pusha
     
-    ; convert to CHS
-    ; C = sector / (18 * 2)
-    ; H = (sector / 18) % 2
-    ; S = (sector % 18) + 1
+    ; save parameters
+    mov [.sector], eax
+    mov [.buffer], ebx
     
-    mov ecx, eax
-    xor edx, edx
-    mov eax, ecx
-    mov esi, 36         ; 18 sectors * 2 heads
-    div esi
-    mov [.cylinder], al
+    ; wait for drive ready
+    call ata_wait_ready
     
-    mov eax, ecx
-    xor edx, edx
-    mov esi, 18
-    div esi
-    and edx, 1
-    mov [.head], dl
+    ; select drive 0, LBA mode
+    mov dx, ATA_DRIVE_HEAD
+    mov eax, [.sector]
+    shr eax, 24         ; get top 4 bits of LBA (bits 24-27)
+    and al, 0x0F        ; mask to 4 bits
+    or al, 0xE0         ; 0xE0 = master drive, LBA mode
+    out dx, al
     
-    mov eax, ecx
-    xor edx, edx
-    mov esi, 18
-    div esi
-    inc edx
-    mov [.sector], dl
+    ; send sector count = 1
+    mov dx, ATA_SECTOR_COUNT
+    mov al, 1
+    out dx, al
     
-    ; read using BIOS int 13h
-    ; (this only works in real mode, but we're protected mode)
-    ; for now, just pretend it works
-    ; in real implementation, we'd need to switch to real mode or use DMA
+    ; send LBA address
+    mov dx, ATA_LBA_LOW
+    mov eax, [.sector]
+    out dx, al          ; LBA bits 0-7
+    
+    mov dx, ATA_LBA_MID
+    mov eax, [.sector]
+    shr eax, 8
+    out dx, al          ; LBA bits 8-15
+    
+    mov dx, ATA_LBA_HIGH
+    mov eax, [.sector]
+    shr eax, 16
+    out dx, al          ; LBA bits 16-23
+    
+    ; send read command
+    mov dx, ATA_COMMAND
+    mov al, ATA_CMD_READ
+    out dx, al
+    
+    ; wait for data ready
+    call ata_wait_drq
+    
+    ; read 512 bytes (256 words)
+    mov edi, [.buffer]
+    mov dx, ATA_DATA
+    mov ecx, 256
+    rep insw            ; read words from DX into [EDI]
     
     popa
     ret
     
-    .cylinder: db 0
-    .head: db 0
-    .sector: db 0
+    .sector: dd 0
+    .buffer: dd 0
 
 ; write sector to disk
-; EAX = sector number
+; EAX = sector number (LBA)
 ; EBX = buffer address
 write_sector:
     pusha
     
-    ; same as read_sector but with write command
-    ; (placeholder implementation)
+    ; save parameters
+    mov [.sector], eax
+    mov [.buffer], ebx
+    
+    ; wait for drive ready
+    call ata_wait_ready
+    
+    ; select drive 0, LBA mode
+    mov dx, ATA_DRIVE_HEAD
+    mov eax, [.sector]
+    shr eax, 24
+    and al, 0x0F
+    or al, 0xE0
+    out dx, al
+    
+    ; send sector count = 1
+    mov dx, ATA_SECTOR_COUNT
+    mov al, 1
+    out dx, al
+    
+    ; send LBA address
+    mov dx, ATA_LBA_LOW
+    mov eax, [.sector]
+    out dx, al
+    
+    mov dx, ATA_LBA_MID
+    mov eax, [.sector]
+    shr eax, 8
+    out dx, al
+    
+    mov dx, ATA_LBA_HIGH
+    mov eax, [.sector]
+    shr eax, 16
+    out dx, al
+    
+    ; send write command
+    mov dx, ATA_COMMAND
+    mov al, ATA_CMD_WRITE
+    out dx, al
+    
+    ; wait for data ready
+    call ata_wait_drq
+    
+    ; write 512 bytes (256 words)
+    mov esi, [.buffer]
+    mov dx, ATA_DATA
+    mov ecx, 256
+    rep outsw           ; write words from [ESI] to DX
+    
+    ; flush cache (wait for write to complete)
+    call ata_wait_ready
     
     popa
     ret
+    
+    .sector: dd 0
+    .buffer: dd 0
 
 ; ========================================
 ; MESSAGES

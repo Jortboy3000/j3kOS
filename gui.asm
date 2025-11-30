@@ -157,32 +157,41 @@ mouse_update:
 draw_mouse_cursor:
     pusha
     
-    ; draw a simple cross cursor
-    mov eax, [mouse_x]
-    mov ebx, [mouse_y]
-    
-    ; horizontal line
-    push eax
-    dec eax
-    dec eax
-    mov ecx, eax
-    add ecx, 4
-    mov dl, COLOR_WHITE
-    call draw_hline
-    pop eax
-    
-    ; vertical line
-    push ebx
-    dec ebx
-    dec ebx
-    mov ecx, ebx
-    add ecx, 4
-    mov dl, COLOR_WHITE
-    call draw_vline
-    pop ebx
+    ; draw arrow cursor sprite (11x16)
+    mov esi, sprite_arrow_cursor
+    movzx eax, word [mouse_x]
+    movzx ebx, word [mouse_y]
+    mov ecx, 11
+    mov edx, 16
+    push 0              ; transparent color = 0 (black)
+    call draw_sprite
+    add esp, 4
     
     popa
     ret
+
+; ========================================
+; GUI SPRITES
+; ========================================
+
+; arrow cursor sprite (11x16)
+sprite_arrow_cursor:
+    db 15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    db 15, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    db 15, 7, 15, 0, 0, 0, 0, 0, 0, 0, 0
+    db 15, 7, 7, 15, 0, 0, 0, 0, 0, 0, 0
+    db 15, 7, 7, 7, 15, 0, 0, 0, 0, 0, 0
+    db 15, 7, 7, 7, 7, 15, 0, 0, 0, 0, 0
+    db 15, 7, 7, 7, 7, 7, 15, 0, 0, 0, 0
+    db 15, 7, 7, 7, 7, 7, 7, 15, 0, 0, 0
+    db 15, 7, 7, 7, 7, 7, 7, 7, 15, 0, 0
+    db 15, 7, 7, 7, 7, 7, 15, 15, 15, 15, 0
+    db 15, 7, 7, 15, 7, 7, 15, 0, 0, 0, 0
+    db 15, 7, 15, 0, 15, 7, 7, 15, 0, 0, 0
+    db 15, 15, 0, 0, 15, 7, 7, 15, 0, 0, 0
+    db 15, 0, 0, 0, 0, 15, 7, 7, 15, 0, 0
+    db 0, 0, 0, 0, 0, 15, 7, 7, 15, 0, 0
+    db 0, 0, 0, 0, 0, 0, 15, 15, 0, 0, 0
 
 ; ========================================
 ; WINDOW MANAGEMENT
@@ -544,10 +553,40 @@ update_buttons:
         test byte [mouse_buttons], 1
         jz .hover
         
+        ; button is pressed - check if it was released (click event)
+        cmp byte [esi + 0], BUTTON_PRESSED
+        je .already_pressed
+        
+        ; just pressed
         mov byte [esi + 0], BUTTON_PRESSED
         jmp .next
         
+        .already_pressed:
+        ; still pressed, keep state
+        jmp .next
+        
         .hover:
+        ; mouse over but not pressed
+        ; check if button was just released (trigger callback)
+        cmp byte [esi + 0], BUTTON_PRESSED
+        jne .set_hover
+        
+        ; button was pressed and now released = CLICK!
+        ; call the callback if it exists
+        mov eax, [esi + 13]     ; callback pointer
+        test eax, eax
+        jz .set_hover
+        
+        ; save registers and call
+        push esi
+        push edi
+        push ecx
+        call eax
+        pop ecx
+        pop edi
+        pop esi
+        
+        .set_hover:
         mov byte [esi + 0], BUTTON_HOVER
         jmp .next
         
@@ -592,7 +631,7 @@ gui_demo:
     mov ecx, 60
     mov edx, 20
     mov esi, gui_button1_label
-    mov edi, 0      ; no callback yet
+    mov edi, gui_button1_callback
     call create_button
     
     mov eax, 140
@@ -600,7 +639,7 @@ gui_demo:
     mov ecx, 60
     mov edx, 20
     mov esi, gui_button2_label
-    mov edi, 0
+    mov edi, gui_button2_callback
     call create_button
     
     mov eax, 60
@@ -608,7 +647,7 @@ gui_demo:
     mov ecx, 140
     mov edx, 20
     mov esi, gui_button3_label
-    mov edi, 0
+    mov edi, gui_button3_callback
     call create_button
     
     ; main loop (for now just draw once)
@@ -616,6 +655,9 @@ gui_demo:
         ; clear screen
         mov al, COLOR_DARK_GRAY
         call clear_graphics_screen
+        
+        ; update mouse
+        call mouse_update
         
         ; draw all windows
         xor eax, eax
@@ -645,6 +687,13 @@ gui_demo:
         
         .buttons_done:
         
+        ; draw status message
+        mov esi, gui_status_msg
+        mov eax, 50
+        mov ebx, 160
+        mov dl, 10              ; green
+        call draw_string_gfx
+        
         ; draw mouse cursor
         call draw_mouse_cursor
         
@@ -661,7 +710,40 @@ gui_demo:
     popa
     ret
 
+; button callbacks
+gui_button1_callback:
+    pusha
+    ; change status message
+    mov esi, .msg
+    mov edi, gui_status_msg
+    mov ecx, 20
+    rep movsb
+    popa
+    ret
+    .msg: db 'Button 1 clicked!  ', 0
+
+gui_button2_callback:
+    pusha
+    mov esi, .msg
+    mov edi, gui_status_msg
+    mov ecx, 20
+    rep movsb
+    popa
+    ret
+    .msg: db 'Button 2 clicked!  ', 0
+
+gui_button3_callback:
+    pusha
+    ; exit to text mode
+    call set_text_mode
+    popa
+    ; don't return to loop
+    add esp, 4      ; skip our return address
+    popa            ; restore from gui_demo
+    ret
+
 gui_demo_title:         db 'j3kOS Window', 0
 gui_button1_label:      db 'Button 1', 0
 gui_button2_label:      db 'Button 2', 0
-gui_button3_label:      db 'Big Button', 0
+gui_button3_label:      db 'Exit to Text', 0
+gui_status_msg:         db 'Click a button...  ', 0
