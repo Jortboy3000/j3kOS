@@ -429,6 +429,262 @@ draw_line:
     .y: dd 0
 
 ; ========================================
+; BITMAP / SPRITE RENDERING
+; ========================================
+
+; draw a bitmap/sprite
+; ESI = pointer to sprite data
+; EAX = x position
+; EBX = y position
+; ECX = width
+; EDX = height
+; [esp+4] = transparent color (0xFF = no transparency)
+draw_sprite:
+    pusha
+    
+    mov [.x], eax
+    mov [.y], ebx
+    mov [.width], ecx
+    mov [.height], edx
+    mov [.sprite_ptr], esi
+    
+    ; get transparent color from stack
+    mov edi, [esp + 36]
+    mov [.transparent], edi
+    
+    mov dword [.row], 0
+    
+    .row_loop:
+        mov eax, [.row]
+        cmp eax, [.height]
+        jge .done
+        
+        mov dword [.col], 0
+        
+        .col_loop:
+            mov eax, [.col]
+            cmp eax, [.width]
+            jge .next_row
+            
+            ; get pixel from sprite data
+            mov esi, [.sprite_ptr]
+            mov eax, [.row]
+            mul dword [.width]
+            add eax, [.col]
+            add esi, eax
+            mov al, [esi]
+            
+            ; check if transparent
+            cmp al, byte [.transparent]
+            je .skip_pixel
+            
+            ; draw the pixel
+            push eax
+            mov eax, [.x]
+            add eax, [.col]
+            mov ebx, [.y]
+            add ebx, [.row]
+            pop ecx
+            call plot_pixel
+            
+            .skip_pixel:
+            inc dword [.col]
+            jmp .col_loop
+        
+        .next_row:
+        inc dword [.row]
+        jmp .row_loop
+    
+    .done:
+    popa
+    ret
+    
+    .x: dd 0
+    .y: dd 0
+    .width: dd 0
+    .height: dd 0
+    .sprite_ptr: dd 0
+    .transparent: dd 0
+    .row: dd 0
+    .col: dd 0
+
+; draw a scaled sprite (simple nearest neighbor)
+; ESI = pointer to sprite data
+; EAX = x position
+; EBX = y position
+; ECX = width
+; EDX = height
+; [esp+4] = scale factor (1, 2, 3, etc.)
+; [esp+8] = transparent color
+draw_sprite_scaled:
+    pusha
+    
+    mov [.x], eax
+    mov [.y], ebx
+    mov [.width], ecx
+    mov [.height], edx
+    mov [.sprite_ptr], esi
+    
+    ; get params from stack
+    mov edi, [esp + 36]
+    mov [.scale], edi
+    mov edi, [esp + 40]
+    mov [.transparent], edi
+    
+    mov dword [.row], 0
+    
+    .row_loop:
+        mov eax, [.row]
+        cmp eax, [.height]
+        jge .done
+        
+        mov dword [.col], 0
+        
+        .col_loop:
+            mov eax, [.col]
+            cmp eax, [.width]
+            jge .next_row
+            
+            ; get pixel from sprite
+            mov esi, [.sprite_ptr]
+            mov eax, [.row]
+            mul dword [.width]
+            add eax, [.col]
+            add esi, eax
+            mov al, [esi]
+            
+            ; transparent?
+            cmp al, byte [.transparent]
+            je .skip_pixel
+            
+            ; draw scaled pixel (fill scale x scale square)
+            mov [.color], al
+            mov dword [.sy], 0
+            
+            .scale_y:
+                mov eax, [.sy]
+                cmp eax, [.scale]
+                jge .skip_pixel
+                
+                mov dword [.sx], 0
+                
+                .scale_x:
+                    mov eax, [.sx]
+                    cmp eax, [.scale]
+                    jge .next_scale_y
+                    
+                    ; calculate screen position
+                    mov eax, [.x]
+                    mov ebx, [.col]
+                    mul dword [.scale]
+                    add eax, ebx
+                    add eax, [.sx]
+                    
+                    mov ebx, [.y]
+                    push eax
+                    mov eax, [.row]
+                    mul dword [.scale]
+                    add ebx, eax
+                    add ebx, [.sy]
+                    pop eax
+                    
+                    mov cl, byte [.color]
+                    call plot_pixel
+                    
+                    inc dword [.sx]
+                    jmp .scale_x
+                
+                .next_scale_y:
+                inc dword [.sy]
+                jmp .scale_y
+            
+            .skip_pixel:
+            inc dword [.col]
+            jmp .col_loop
+        
+        .next_row:
+        inc dword [.row]
+        jmp .row_loop
+    
+    .done:
+    popa
+    ret
+    
+    .x: dd 0
+    .y: dd 0
+    .width: dd 0
+    .height: dd 0
+    .sprite_ptr: dd 0
+    .scale: dd 0
+    .transparent: dd 0
+    .color: dd 0
+    .row: dd 0
+    .col: dd 0
+    .sx: dd 0
+    .sy: dd 0
+
+; ========================================
+; SPRITE DATA (SOME DEMO SPRITES)
+; ========================================
+
+; 8x8 smiley face
+sprite_smiley:
+    db 0, 0, 0, 0, 0, 0, 0, 0
+    db 0, 0, 14, 14, 14, 14, 0, 0
+    db 0, 14, 14, 14, 14, 14, 14, 0
+    db 0, 14, 0, 14, 14, 0, 14, 0      ; eyes
+    db 0, 14, 14, 14, 14, 14, 14, 0
+    db 0, 14, 0, 14, 14, 0, 14, 0      ; mouth
+    db 0, 0, 14, 0, 0, 14, 0, 0
+    db 0, 0, 0, 0, 0, 0, 0, 0
+
+; 8x8 heart
+sprite_heart:
+    db 0, 0, 0, 0, 0, 0, 0, 0
+    db 0, 12, 12, 0, 0, 12, 12, 0
+    db 12, 12, 12, 12, 12, 12, 12, 12
+    db 12, 12, 12, 12, 12, 12, 12, 12
+    db 0, 12, 12, 12, 12, 12, 12, 0
+    db 0, 0, 12, 12, 12, 12, 0, 0
+    db 0, 0, 0, 12, 12, 0, 0, 0
+    db 0, 0, 0, 0, 0, 0, 0, 0
+
+; 16x16 player character (simple dude)
+sprite_player:
+    ; row 1
+    db 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    ; row 2
+    db 0, 0, 0, 0, 0, 0, 14, 14, 14, 14, 0, 0, 0, 0, 0, 0
+    ; row 3
+    db 0, 0, 0, 0, 0, 14, 14, 14, 14, 14, 14, 0, 0, 0, 0, 0
+    ; row 4
+    db 0, 0, 0, 0, 0, 14, 0, 14, 14, 0, 14, 0, 0, 0, 0, 0
+    ; row 5
+    db 0, 0, 0, 0, 0, 14, 14, 14, 14, 14, 14, 0, 0, 0, 0, 0
+    ; row 6
+    db 0, 0, 0, 0, 0, 0, 14, 4, 4, 14, 0, 0, 0, 0, 0, 0
+    ; row 7
+    db 0, 0, 0, 0, 0, 0, 0, 14, 14, 0, 0, 0, 0, 0, 0, 0
+    ; row 8
+    db 0, 0, 0, 0, 1, 1, 1, 14, 14, 1, 1, 1, 0, 0, 0, 0
+    ; row 9
+    db 0, 0, 0, 0, 0, 1, 1, 14, 14, 1, 1, 0, 0, 0, 0, 0
+    ; row 10
+    db 0, 0, 0, 0, 0, 1, 1, 14, 14, 1, 1, 0, 0, 0, 0, 0
+    ; row 11
+    db 0, 0, 0, 0, 0, 1, 1, 14, 14, 1, 1, 0, 0, 0, 0, 0
+    ; row 12
+    db 0, 0, 0, 0, 0, 0, 0, 14, 14, 0, 0, 0, 0, 0, 0, 0
+    ; row 13
+    db 0, 0, 0, 0, 0, 0, 14, 0, 0, 14, 0, 0, 0, 0, 0, 0
+    ; row 14
+    db 0, 0, 0, 0, 0, 6, 14, 0, 0, 14, 6, 0, 0, 0, 0, 0
+    ; row 15
+    db 0, 0, 0, 0, 6, 6, 0, 0, 0, 0, 6, 6, 0, 0, 0, 0
+    ; row 16
+    db 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+
+; ========================================
 ; GRAPHICS TEXT (8x8 BITMAP FONT)
 ; ========================================
 
@@ -529,6 +785,59 @@ graphics_demo:
     mov ecx, 310
     mov dl, COLOR_YELLOW
     call draw_hline
+    
+    ; draw some sprites baby!
+    ; smiley face at (160, 10)
+    mov esi, sprite_smiley
+    mov eax, 160
+    mov ebx, 10
+    mov ecx, 8
+    mov edx, 8
+    push 0          ; transparent color = 0 (black)
+    call draw_sprite
+    add esp, 4
+    
+    ; heart at (180, 10)
+    mov esi, sprite_heart
+    mov eax, 180
+    mov ebx, 10
+    mov ecx, 8
+    mov edx, 8
+    push 0
+    call draw_sprite
+    add esp, 4
+    
+    ; scaled smiley (2x) at (200, 30)
+    mov esi, sprite_smiley
+    mov eax, 200
+    mov ebx, 30
+    mov ecx, 8
+    mov edx, 8
+    push 0          ; transparent
+    push 2          ; scale 2x
+    call draw_sprite_scaled
+    add esp, 8
+    
+    ; player sprite at (140, 120)
+    mov esi, sprite_player
+    mov eax, 140
+    mov ebx, 120
+    mov ecx, 16
+    mov edx, 16
+    push 0
+    call draw_sprite
+    add esp, 4
+    
+    ; scaled player (3x) at (20, 120)
+    mov esi, sprite_player
+    mov eax, 20
+    mov ebx, 120
+    mov ecx, 16
+    mov edx, 16
+    push 0          ; transparent
+    push 3          ; scale 3x
+    call draw_sprite_scaled
+    add esp, 8
     
     popa
     ret
