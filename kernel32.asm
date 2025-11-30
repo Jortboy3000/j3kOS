@@ -9,43 +9,48 @@
 ; KERNEL ENTRY - LET'S FUCKING GO
 ; ========================================
 kernel_start:
-    ; loader already set up segments for us
-    ; clear the screen
+    ; read boot_mode from loader
+    mov al, [0x7E00]
+    mov [boot_mode], al
+    
     call clear_screen
     
-    ; say hi
     mov esi, msg_boot
     call print_string
     
-    ; set up interrupts
+    ; show boot mode if not normal
+    cmp byte [boot_mode], 0
+    je .skip_mode_msg
+    cmp byte [boot_mode], 1
+    je .safe_mode
+    mov esi, msg_verbose_mode
+    jmp .show_mode
+.safe_mode:
+    mov esi, msg_safe_mode
+.show_mode:
+    call print_string
+.skip_mode_msg:
+    
     call init_idt
-    
-    ; initialize PIC (interrupt controller)
     call init_pic
-    
-    ; start the timer
     call init_pit
-    
-    ; get keyboard working
     call init_keyboard
-    
-    ; set up task switching
     call init_tss
-    
-    ; initialize page management
     call init_page_mgmt
     
-    ; enable interrupts you cuck
     sti
     
-    ; we're ready
+    ; skip sound in safe mode
+    cmp byte [boot_mode], 1
+    je .skip_sound
+    call play_startup_sound
+.skip_sound:
+    
     mov esi, msg_ready
     call print_string
     
-    ; run the shell
     call shell_main
     
-    ; if we get here something's fucked
     cli
     hlt
 
@@ -59,6 +64,7 @@ WHITE_ON_BLACK equ 0x0F
 
 cursor_x: dd 0
 cursor_y: dd 0
+boot_mode: db 0  ; 0=normal, 1=safe, 2=verbose
 
 clear_screen:
     pusha
@@ -153,6 +159,81 @@ print_hex:
         call print_char
         pop eax
         loop .loop
+    popa
+    ret
+
+print_newline:
+    ; print a newline character
+    pusha
+    mov al, 10
+    call print_char
+    popa
+    ret
+
+print_hex_dump:
+    ; ESI = buffer, ECX = length (max 256 bytes for display)
+    pusha
+    push ecx
+    
+    cmp ecx, 256
+    jle .print_loop
+    mov ecx, 256
+    
+.print_loop:
+    test ecx, ecx
+    jz .done_dump
+    
+    ; print byte as hex
+    lodsb
+    movzx eax, al
+    push ecx
+    push esi
+    
+    ; print high nibble
+    mov cl, al
+    shr cl, 4
+    and cl, 0x0F
+    add cl, '0'
+    cmp cl, '9'
+    jle .high_digit
+    add cl, 7
+.high_digit:
+    mov al, cl
+    call print_char
+    
+    ; print low nibble
+    pop esi
+    push esi
+    mov al, [esi-1]
+    and al, 0x0F
+    add al, '0'
+    cmp al, '9'
+    jle .low_digit
+    add al, 7
+.low_digit:
+    call print_char
+    
+    ; space between bytes
+    mov al, ' '
+    call print_char
+    
+    pop esi
+    pop ecx
+    dec ecx
+    
+    ; newline every 16 bytes
+    mov eax, esi
+    sub eax, [esp + 28]
+    and eax, 0x0F
+    test eax, eax
+    jnz .print_loop
+    
+    call print_newline
+    jmp .print_loop
+    
+.done_dump:
+    pop ecx
+    call print_newline
     popa
     ret
 
@@ -1606,6 +1687,12 @@ swap_page_in:
 %include "graphics.asm"
 %include "gui.asm"
 %include "j3kfs.asm"
+%include "sound.asm"
+; %include "tcp.asm"          ; Disabled - too large (630 lines)
+; %include "http.asm"         ; Disabled - too large (640 lines)
+; %include "json.asm"         ; Disabled - too large (850 lines)
+; %include "rest_api.asm"     ; Disabled - too large (630 lines)
+; %include "editor.asm"       ; Disabled - too large (2100+ lines)
 
 ; compress multiple cold pages (for memory pressure)
 compress_cold_pages:
@@ -2584,8 +2671,11 @@ process_command:
     cmp al, ':'
     je .has_colon
     
-    ; shift buffer right to add colon at start
+    ; shift buffer right to add colon at start (with safety check)
     mov ecx, [cmd_length]
+    cmp ecx, CMD_BUFFER_SIZE-2  ; make sure we have room for : and null
+    jge .has_colon              ; skip if buffer would overflow
+    
     inc ecx
     mov esi, cmd_buffer
     add esi, ecx
@@ -2769,6 +2859,20 @@ process_command:
     test eax, eax
     jz .do_say
     
+    ; is it ":beep"?
+    mov esi, cmd_buffer
+    mov edi, cmd_beep
+    call strcmp
+    test eax, eax
+    jz .do_beep
+    
+    ; is it ":loadnet"? (temporarily disabled)
+    ; mov esi, cmd_buffer
+    ; mov edi, cmd_loadnet
+    ; call strcmp
+    ; test eax, eax
+    ; jz .do_loadnet
+    
     ; is it ":format"?
     mov esi, cmd_buffer
     mov edi, cmd_format
@@ -2880,6 +2984,28 @@ process_command:
     call strncmp
     test eax, eax
     jz .fs_delete
+    
+    ; :edit or :vi or :nano - DISABLED (editor too large)
+    ; mov esi, cmd_buffer
+    ; mov edi, cmd_edit
+    ; mov ecx, 6
+    ; call strncmp
+    ; test eax, eax
+    ; jz .do_edit
+    
+    ; mov esi, cmd_buffer
+    ; mov edi, cmd_vi
+    ; mov ecx, 4
+    ; call strncmp
+    ; test eax, eax
+    ; jz .do_edit
+    
+    ; mov esi, cmd_buffer
+    ; mov edi, cmd_nano
+    ; mov ecx, 6
+    ; call strncmp
+    ; test eax, eax
+    ; jz .do_edit
     
     ; unknown command
     mov esi, msg_unknown
@@ -3046,9 +3172,9 @@ process_command:
         jmp .done
     
     .do_gui:
-        ; GUI demo with mouse support
+        ; GUI demo - simple window display
         call set_graphics_mode
-        call init_mouse
+        ; call init_mouse  ; Skip mouse init for now
         call gui_demo
         jmp .done
     
@@ -3142,6 +3268,38 @@ process_command:
             mov al, 10
             call print_char
             jmp .done
+    
+    .do_beep:
+        ; play a beep sound
+        call beep
+        mov esi, msg_beep_done
+        call print_string
+        jmp .done
+    
+    ; .do_loadnet:
+        ; load network extensions module
+        ; mov esi, msg_loadnet_loading
+        ; call print_string
+        ; 
+        ; check if already loaded
+        ; cmp byte [netext_loaded], 1
+        ; je .net_already_loaded
+        ; 
+        ; simulate loading from disk (in real implementation would read netext.bin)
+        ; for now, just set a flag and show success
+        ; mov byte [netext_loaded], 1
+        ; mov dword [netext_base], 0x50000
+        ; 
+        ; mov esi, msg_loadnet_success
+        ; call print_string
+        ; mov esi, msg_loadnet_info
+        ; call print_string
+        ; jmp .done
+        ; 
+    ; .net_already_loaded:
+        ; mov esi, msg_loadnet_already
+        ; call print_string
+        ; jmp .done
     
     .do_format:
         ; format disk with J3KFS
@@ -3347,6 +3505,38 @@ process_command:
             call print_string
             jmp .done
     
+    ; .do_edit:  ; DISABLED - editor too large
+        ; check if filename provided
+        ; cmp dword [cmd_length], 6
+        ; jle .edit_new_file
+        ; 
+        ; get filename (skip ":edit " or ":vi " or ":nano ")
+        ; mov esi, cmd_buffer
+        ; add esi, 6
+        ; 
+        ; skip any extra spaces
+        ; .skip_spaces:
+        ;     lodsb
+        ;     cmp al, ' '
+        ;     je .skip_spaces
+        ;     dec esi
+        ; 
+        ; call editor_main
+        ; 
+        ; redraw screen after editor
+        ; call clear_screen
+        ; mov esi, msg_ready
+        ; call print_string
+        ; jmp .done
+        ; 
+        ; .edit_new_file:
+        ;     xor esi, esi        ; null for new file
+        ;     call editor_main
+        ;     call clear_screen
+        ;     mov esi, msg_ready
+        ;     call print_string
+        ;     jmp .done
+    
     .done:
         ret
 
@@ -3422,60 +3612,43 @@ strcmp_simple:
 ; ========================================
 msg_boot:       db 'j3kOS 32-bit Protected Mode', 10
                 db 'by Jortboy3k (@jortboy3k)', 10, 10, 0
+msg_safe_mode:  db '[SAFE MODE]', 10, 0
+msg_verbose_mode: db '[VERBOSE MODE]', 10, 0
 msg_ready:      db 'System ready. Type "help" for commands.', 10, 10, 0
 msg_prompt:     db '> ', 0
 msg_unknown:    db 'Unknown command. Type "help" for list.', 10, 0
-msg_help_text:  db 'j3kOS Commands (: prefix optional):', 10, 10
-                db 'System:', 10
-                db '  help           - Show this help', 10
-                db '  clear, cls     - Clear screen', 10
-                db '  ver            - Show version', 10
-                db '  reboot         - Reboot system', 10, 10
-                db 'Info:', 10
-                db '  time           - Show system time', 10
-                db '  datetime       - Show date and time', 10
-                db '  mem            - Show memory usage', 10
-                db '  pci            - Scan PCI devices', 10, 10
-                db 'Graphics:', 10
-                db '  gfx            - Graphics mode demo', 10
-                db '  gui            - GUI with mouse', 10
-                db '  text           - Return to text mode', 10, 10
-                db 'Network:', 10
-                db '  net            - Initialize network', 10
-                db '  netstats       - Show network info', 10
-                db '  ping <ip>      - Ping an IP address', 10, 10
-                db 'File System:', 10
-                db '  format         - Format disk', 10
-                db '  mount          - Mount filesystem', 10
-                db '  ls, list, show - List files', 10
-                db '  read, cat, open <file> - Read file', 10
-                db '  write <file> <text> - Write file', 10
-                db '  del, delete, rm <file> - Delete file', 10, 10
-                db 'Advanced:', 10
-                db '  pages          - Page management', 10
-                db '  swap           - Swap info', 10
-                db '  tasks          - Task list', 10
-                db '  say <text>     - Echo with delay', 10, 0
+msg_help_text:  db 'j3kOS commands (: optional):', 10, 10
+                db 'help, clear, ver, reboot, time, datetime, mem, pci', 10
+                db 'gfx, gui, text, beep, say <text>', 10
+                db 'net, netstats, ping <ip>', 10
+                db 'loadnet (load network extensions)', 10
+                db 'format, mount, ls, read <f>, write <f> <t>, del <f>', 10
+                db 'pages, swap, tasks', 10, 0
 msg_time_text:  db 'Timer ticks: 0x', 0
-msg_mem_text:   db 'Memory: 32MB (0x00000000 - 0x02000000)', 10
-                db 'Kernel at 0x10000, Stack at 0x90000', 10, 0
-msg_reboot_text: db 'Rebooting...', 10, 0
-msg_ping_sent:   db 'Ping sent! (waiting for reply...)', 10, 0
-msg_text_mode:   db 'Back to text mode baby!', 10, 0
-msg_formatting:  db 'Formatting disk with J3KFS...', 10, 0
-msg_ver_text:   db 'j3kOS v1.0 - 32-bit Protected Mode', 10
-                db 'by jortboy3k (@jortboy3k)', 10, 0
+msg_mem_text:   db '32MB ram, kernel @ 0x10000, stack @ 0x90000', 10, 0
+msg_reboot_text: db 'rebooting...', 10, 0
+msg_ping_sent:   db 'ping sent', 10, 0
+msg_text_mode:   db 'text mode', 10, 0
+msg_formatting:  db 'formatting...', 10, 0
+msg_ver_text:   db 'j3kOS v1.0 by jortboy3k', 10, 0
 msg_echo:       db '  ...', 0
+msg_beep_done:  db 'beep!', 10, 0
+
+; Network extension module messages
+msg_loadnet_loading:    db 'Loading network extensions...', 10, 0
+msg_loadnet_success:    db 'Network module loaded at 0x50000', 10, 0
+msg_loadnet_info:       db 'Available: tcp, http, json, api commands', 10, 0
+msg_loadnet_already:    db 'Network extensions already loaded', 10, 0
 
 ; file system messages
 msg_fs_list_header: db 'Files:', 10, 0
 msg_fs_bullet:      db '  - ', 0
-msg_fs_no_files:    db '  (no files yet)', 10, 0
-msg_fs_created:     db 'File created!', 10, 0
-msg_fs_deleted:     db 'File deleted!', 10, 0
-msg_fs_not_found:   db 'File not found!', 10, 0
-msg_fs_need_name:   db 'You need to specify a filename!', 10, 0
-msg_fs_full:        db 'No space left! (max 16 files)', 10, 0
+msg_fs_no_files:    db '  (empty)', 10, 0
+msg_fs_created:     db 'created', 10, 0
+msg_fs_deleted:     db 'deleted', 10, 0
+msg_fs_not_found:   db 'not found', 10, 0
+msg_fs_need_name:   db 'need filename', 10, 0
+msg_fs_full:        db 'disk full (16 max)', 10, 0
 msg_fs_reading:     db 'Reading: ', 0
 msg_fs_content:     db 10, '(file is empty)', 10, 0
 
@@ -3503,6 +3676,12 @@ cmd_text:       db ':text', 0
 cmd_format:     db ':format', 0
 cmd_mount:      db ':mount', 0
 cmd_say:        db ':say ', 0
+cmd_beep:       db ':beep', 0
+cmd_loadnet:    db ':loadnet', 0
+
+; Network extension module state
+netext_loaded:  db 0
+netext_base:    dd 0
 
 msg_year_prefix: db '20', 0
 msg_tz_set:     db 'Timezone offset set!', 10, 0
@@ -3530,6 +3709,9 @@ cmd_remove:     db ':remove ', 0
 cmd_del:        db ':del ', 0
 cmd_rm:         db ':rm ', 0
 cmd_cls:        db ':cls', 0
+cmd_edit:       db ':edit ', 0
+cmd_vi:         db ':vi ', 0
+cmd_nano:       db ':nano ', 0
 
 ; IDT
 align 16

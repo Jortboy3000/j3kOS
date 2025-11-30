@@ -75,12 +75,17 @@ init_mouse:
 mouse_update:
     pusha
     
+    ; check if mouse data is available (non-blocking)
+    in al, 0x64
+    test al, 1          ; data available?
+    jz .done            ; no data, skip update
+    
     ; read mouse data from port 0x60
     in al, 0x60
     mov [.packet], al
     
-    ; wait for dx
-    mov ecx, 1000
+    ; wait for dx (with timeout)
+    mov ecx, 100        ; reduced timeout
     .wait1:
         in al, 0x64
         test al, 1
@@ -92,8 +97,8 @@ mouse_update:
     in al, 0x60
     mov [.dx], al
     
-    ; wait for dy
-    mov ecx, 1000
+    ; wait for dy (with timeout)
+    mov ecx, 100        ; reduced timeout
     .wait2:
         in al, 0x64
         test al, 1
@@ -617,7 +622,11 @@ update_buttons:
 gui_demo:
     pusha
     
-    ; create main window
+    ; clear screen
+    mov al, COLOR_DARK_GRAY
+    call clear_graphics_screen
+    
+    ; draw a simple window frame
     mov eax, 40
     mov ebx, 30
     mov ecx, 240
@@ -625,90 +634,49 @@ gui_demo:
     mov esi, gui_demo_title
     call create_window
     
-    ; create buttons
-    mov eax, 60
-    mov ebx, 60
-    mov ecx, 60
-    mov edx, 20
-    mov esi, gui_button1_label
-    mov edi, gui_button1_callback
-    call create_button
+    ; draw the window once
+    xor eax, eax
+    call draw_window
     
-    mov eax, 140
-    mov ebx, 60
-    mov ecx, 60
-    mov edx, 20
-    mov esi, gui_button2_label
-    mov edi, gui_button2_callback
-    call create_button
+    ; draw some text
+    mov esi, gui_status_msg
+    mov eax, 50
+    mov ebx, 80
+    mov dl, 15              ; white
+    call draw_string_gfx
     
-    mov eax, 60
+    mov esi, .msg_esc
+    mov eax, 50
     mov ebx, 100
-    mov ecx, 140
-    mov edx, 20
-    mov esi, gui_button3_label
-    mov edi, gui_button3_callback
-    call create_button
+    mov dl, 14              ; yellow
+    call draw_string_gfx
     
-    ; main loop (for now just draw once)
+    ; simple loop - just wait for ESC
     .loop:
-        ; clear screen
-        mov al, COLOR_DARK_GRAY
-        call clear_graphics_screen
+        ; check for ESC key
+        in al, 0x64         ; check keyboard status
+        test al, 1          ; data available?
+        jz .no_key
         
-        ; update mouse
-        call mouse_update
+        in al, 0x60         ; read scancode
+        cmp al, 0x01        ; ESC key?
+        je .exit
         
-        ; draw all windows
-        xor eax, eax
-        .draw_windows:
-            cmp eax, [gui_window_count]
-            jge .windows_done
-            push eax
-            call draw_window
-            pop eax
-            inc eax
-            jmp .draw_windows
-        
-        .windows_done:
-        
-        ; update and draw buttons
-        call update_buttons
-        
-        xor eax, eax
-        .draw_buttons:
-            cmp eax, [gui_button_count]
-            jge .buttons_done
-            push eax
-            call draw_button
-            pop eax
-            inc eax
-            jmp .draw_buttons
-        
-        .buttons_done:
-        
-        ; draw status message
-        mov esi, gui_status_msg
-        mov eax, 50
-        mov ebx, 160
-        mov dl, 10              ; green
-        call draw_string_gfx
-        
-        ; draw mouse cursor
-        call draw_mouse_cursor
+        .no_key:
         
         ; small delay
-        mov ecx, 100000
+        mov ecx, 50000
         .delay:
             nop
             loop .delay
         
-        ; check for keypress to exit (for now)
-        ; in real implementation this would be event-driven
         jmp .loop
     
+    .exit:
     popa
     ret
+    
+    .msg_esc: db 'Press ESC to exit', 0
 
 ; button callbacks
 gui_button1_callback:

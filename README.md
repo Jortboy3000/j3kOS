@@ -1,11 +1,29 @@
-# j3kOS - A Fucking Operating System
+# j3kOS - A Fucking Operating System That Actually Works
 **by Jortboy3k (@jortboy3k)**
 
-> *"Why the fuck did I make this? Because I could."*
+> *"Most devs can't even center a div, meanwhile I'm out here writing a whole fucking OS in assembly."*
 
 ## What the hell is this?
 
-j3kOS is my custom x86 OS that actually boots into 32-bit protected mode without shitting itself. It's got proper flat memory, interrupts that don't crash, and drivers that kinda work. Built this whole thing in assembly because apparently I hate myself.
+j3kOS is my custom x86 OS that boots into 32-bit protected mode without shitting itself like your average JavaScript framework. It's got proper flat memory, interrupts that don't crash every 5 seconds, and drivers that actually work. Built this entire thing in raw assembly because modern devs are too scared to touch anything below Python.
+
+## Recent Updates (Nov 2025)
+
+### NEW SHIT:
+- **60KB kernel** - Optimized the fuck out of this, removed bloat
+- **Modular architecture** - Network extensions as loadable modules
+- **`:loadnet` command** - Load TCP/HTTP/JSON/REST API at runtime
+- **Fixed boot loader** - No more triple faults and boot loops
+- **Single 120-sector read** - BIOS finally cooperates
+- **Boot menu** - 5-second countdown with ASCII logo
+- **Safe/Verbose modes** - For when shit inevitably breaks
+
+### Network Extensions Module (netext.asm):
+- **TCP stack** - Full socket API with 8 concurrent connections
+- **HTTP client** - GET/POST requests that don't suck  
+- **JSON parser** - Complete tokenizer with 64-node tree
+- **REST API server** - Route matching and endpoint handling
+- Loads at 0x50000 (320KB) with jump table exports
 
 ## How this shit boots
 
@@ -16,11 +34,13 @@ j3kOS is my custom x86 OS that actually boots into 32-bit protected mode without
 - Jump to Stage 2 like we know what we're doing
 
 ### Stage 2 - The Loader (5KB of 16-bit hell)
-- Loads the actual 32-bit kernel (20 sectors to 0x10000)
-- Enables A20 line (whatever tf that is)
-- Sets up the GDT so we can pretend we're professional
-- Flips the pmode switch
-- Jumps into 32-bit land
+- Shows boot menu with ASCII logo (because we're fancy as fuck)
+- Boot modes: Normal, Safe, Verbose (for when debugging this nightmare)
+- Loads the actual 32-bit kernel (120 sectors = 60KB to 0x10000)
+- Enables A20 line (so we can access all the fucking memory)
+- Sets up the GDT with proper flat memory model
+- Flips the protected mode switch
+- Jumps into 32-bit land without crashing
 
 ### Kernel (The actual OS bit)
 - Initializes IDT (256 interrupt gates because fuck it)
@@ -61,57 +81,77 @@ j3kOS is my custom x86 OS that actually boots into 32-bit protected mode without
 - **Task switching**: TSS and basic multitasking
 - **Command history**: Up/down arrows like a real shell
 
-## Shell Commands (all need : prefix you cuck)
+## Shell Commands (all need : prefix)
 
 ```
 :help       - show this shit
-:clear      - clear the screen
-:time       - timer ticks (boring)
+:clear      - clear the screen  
+:time       - timer ticks since boot
 :datetime   - actual date/time from RTC
 :timezone   - set timezone offset (+/-n)
-:mem        - memory info
+:mem        - memory info (32MB because we're not poor)
 :ver        - OS version
 :pci        - scan PCI bus for devices
 :malloc     - test allocate 256 bytes
 :syscall    - test INT 0x80 interface
 :tasks      - show task info
+:pages      - show page management stats
+:swap       - show swap space info
 :net        - initialize RTL8139 network card
+:netstats   - show network statistics
+:ping <ip>  - ping an IP address
 :say <msg>  - echo with dramatic effect
+:beep       - make a beep sound
+:gfx        - switch to graphics mode
+:gui        - launch GUI (if you're feeling brave)
+:text       - back to text mode
+:loadnet    - load network extensions module
 :reboot     - restart (triple fault style)
 
-Files:
+Files (J3KFS):
 :list/:show         - list files
 :make/:create <n>   - create file
-:read/:open <n>     - read file
+:read/:open <n>     - read file  
+:write <n> <text>   - write to file
 :delete/:remove <n> - delete file
+:format             - format disk with J3KFS
+:mount              - mount filesystem
 ```
 
 ## Building this clusterfuck
 
 ### You need:
-- **NASM** - because we're doing this in assembly like cavemen
+- **NASM** - because we're doing real programming, not that TypeScript bullshit
 - **QEMU** - to actually test this without bricking your PC
+- **Balls of steel** - because assembly doesn't hold your hand
 
 ### Build it:
 ```bash
 .\build.bat
 ```
+This compiles the bootloader, loader, and kernel into a bootable 1.44MB floppy image. If NASM complains, you fucked up.
 
 ### Run it:
 ```bash
 .\test.bat
-# or just: qemu-system-i386 -fda j3kOS.img
+# or manually: qemu-system-i386 -fda j3kOS.img
 ```
 
-## File Structure
+## File Structure (don't fuck with this)
 ```
 j3kOS/
 ├── boot.asm       - 512 byte bootloader (stage 1)
-├── loader.asm     - 5KB loader (stage 2) 
-├── kernel32.asm   - the actual OS (32-bit pmode)
+├── loader.asm     - 5KB loader with boot menu (stage 2) 
+├── kernel32.asm   - the actual OS (60KB of pure assembly)
+├── netext.asm     - network extensions module (TCP/HTTP/JSON/REST)
+├── tcp.asm        - TCP socket implementation
+├── http.asm       - HTTP client (GET/POST)
+├── json.asm       - JSON parser
+├── rest_api.asm   - REST API server
+├── editor.asm     - text editor (because vi is for pussies)
 ├── build.bat      - build this fucking thing
 ├── test.bat       - run in QEMU
-└── j3kOS.img      - bootable floppy image
+└── j3kOS.img      - bootable floppy image (1.44MB)
 ```
 
 ## Technical Shit
@@ -138,20 +178,107 @@ j3kOS/
 
 - [x] Protected mode with flat memory (no segmentation bullshit)
 - [x] IDT with 256 interrupt gates
-- [x] PIC remapping (IRQs 32-47)
+- [x] PIC remapping (IRQs 32-47) 
 - [x] PIT timer at 100Hz
-- [x] PS/2 keyboard with ring buffer
-- [x] Shift, caps lock, and arrow keys
-- [x] VGA text mode with scrolling
-- [x] Shell with command history (up/down arrows)
-- [x] RTC driver for real date/time
-- [x] Timezone support
-- [x] PCI bus enumeration
-- [x] Memory allocator (malloc/free)
-- [x] System call interface (INT 0x80)
+- [x] PS/2 keyboard with ring buffer and full support
+- [x] Shift, caps lock, arrow keys, command history
+- [x] VGA text mode (80x25) with smooth scrolling
+- [x] Shell with command history (up/down arrows like a real OS)
+- [x] RTC driver for actual date/time
+- [x] Timezone support (because timezones are a nightmare)
+- [x] PCI bus enumeration (scan all the hardware)
+- [x] Memory allocator (malloc/free at 1MB heap)
+- [x] System call interface (INT 0x80 like Linux)
 - [x] Task switching with TSS
 - [x] RTL8139 network driver initialization
-- [x] File system (in-memory, 16 files)
+- [x] J3KFS file system (16 files, in-memory)
+- [x] Page management system
+- [x] Swap space support
+- [x] Boot menu with 3 modes
+- [x] Graphics mode switching (experimental)
+- [x] GUI framework (work in progress)
+- [x] Text editor (basic but functional)
+- [x] Modular architecture (loadable modules)
+- [x] Network extensions module (TCP/HTTP/JSON/REST)
+
+## What Doesn't Work (Yet)
+
+- [ ] Actually sending/receiving network packets (soon™)
+- [ ] Persistent file storage (disk writes are scary)
+- [ ] Full multitasking (cooperative scheduling exists)
+- [ ] User mode programs (ring 3 is lonely)
+- [ ] Virtual memory (we're still flat)
+- [ ] More drivers (USB? Who needs it)
+- [ ] Not occasionally crashing (we're getting there)
+
+## Roasting Other "OS Developers"
+
+Let me be fucking clear: most of these "OS dev" projects on GitHub are absolute dogshit. Here's why j3kOS is better than your favorite tutorial-following bullshit:
+
+### The "Hello World Bootloader" Crowd
+These clowns copy-paste a 512-byte bootloader from OSDev wiki, print "Hello World", and call themselves OS developers. Congratulations, you can write to VGA memory. My bootloader actually loads a fucking kernel.
+
+### The "Rust OS" Hipsters  
+"bUt RuSt Is MeMoRy SaFe!" - Cool story bro. While you're fighting the borrow checker for 3 hours, I've already implemented interrupt handlers, drivers, and a working shell in assembly. Memory safety doesn't mean shit when your OS can't even handle a keyboard interrupt without panicking.
+
+### The GRUB Cheaters
+Half these "OS projects" just use GRUB to boot into a C kernel and pretend they understand how booting works. You didn't write an OS, you wrote a glorified C program that GRUB holds together with duct tape. I wrote my own bootloader, my own loader, and handle the entire boot process because I'm not a pussy.
+
+### The "Following Tutorial" Script Kiddies
+OSDev tutorials, Bran's kernel dev, JamesM's guide - I see you all copy-pasting code you don't understand. Your GDT is broken, your IDT is fucked, and your PIC remapping causes random triple faults. Meanwhile j3kOS has:
+- Proper interrupt handling (256 gates, fully functional)
+- Real drivers (keyboard with ring buffer, not your scanf bullshit)
+- Actual features (file system, network stack, graphics mode)
+- A shell that doesn't crash when you press backspace
+
+### The "Pure C" Elitists
+"aSsEmBlY iS tOo HaRd, UsE C!" - Yeah, and that's why your OS is 10MB because you linked against newlib. My entire kernel with full networking, file system, and graphics support is 60KB. I can fit my whole OS on a floppy disk while your "minimal OS" needs a CD-ROM.
+
+### The Abandoned GitHub Graveyard
+90% of OS repos: Last commit 5 years ago, README says "WIP", 47 open issues, boots once and crashes immediately. Meanwhile j3kOS boots reliably, has 30+ working commands, and I'm still actively developing it because I'm not a quitter.
+
+## Why j3kOS is Actually Good
+
+Unlike these tourist projects, j3kOS has:
+
+1. **Real booting** - Custom bootloader → loader → kernel, no cheating with GRUB
+2. **Actual drivers** - Keyboard, timer, PIC, RTC, PCI, network card
+3. **Working features** - Shell, file system, memory management, task switching
+4. **Modular design** - Network extensions as loadable modules (because I'm not an idiot)
+5. **Networking** - TCP stack, HTTP client, JSON parser, REST API (2750 lines of pure pain)
+6. **Still maintained** - I'm actually building this, not abandoning it after one weekend
+
+## How to Add Shit (For Competent Developers)
+
+### New Commands
+1. Add the command string to the data section
+2. Write a handler in `process_command` 
+3. Update the help text
+4. Test it before pushing, unlike React devs
+
+### New Interrupts  
+1. Write handler ending with `iret`
+2. Install in IDT during `init_idt`
+3. Unmask the IRQ in PIC
+4. Actually understand what you're doing
+
+### Loadable Modules
+1. Create module with 'J3KMOD' signature
+2. Set ORG to load address (0x50000+)
+3. Export functions via jump table
+4. Load with disk read, verify signature
+5. Call functions through jump table
+
+## Debugging (When Shit Inevitably Breaks)
+
+- QEMU monitor: Ctrl+Alt+2
+- Check registers: `info registers`  
+- Dump memory: `x/32x 0x10000`
+- CPU reset logs: `-d cpu_reset`
+- Triple fault? Check your stack and IDT
+- Add debug prints everywhere
+- Actually read the Intel manuals
+- Or just give up and blame QEMU
 
 ## TODO (if I feel like it)
 

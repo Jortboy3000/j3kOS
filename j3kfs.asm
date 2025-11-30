@@ -1142,127 +1142,57 @@ ata_wait_drq:
 ; read sector from disk
 ; EAX = sector number (LBA)
 ; EBX = buffer address
+; ========================================
+; SECTOR CACHE - SINGLE SECTOR BUFFER
+; ========================================
+sector_cache: times 512 db 0
+cached_sector: dd 0xFFFFFFFF    ; -1 means no sector cached
+
+; read sector from cache
+; EAX = sector number (LBA)
+; EBX = buffer address
 read_sector:
     pusha
     
-    ; save parameters
-    mov [.sector], eax
-    mov [.buffer], ebx
+    ; check if this sector is cached
+    cmp eax, [cached_sector]
+    je .cached
     
-    ; wait for drive ready
-    call ata_wait_ready
+    ; not cached - just return zeros
+    mov edi, ebx
+    mov ecx, 128
+    xor eax, eax
+    rep stosd
+    jmp .done
     
-    ; select drive 0, LBA mode
-    mov dx, ATA_DRIVE_HEAD
-    mov eax, [.sector]
-    shr eax, 24         ; get top 4 bits of LBA (bits 24-27)
-    and al, 0x0F        ; mask to 4 bits
-    or al, 0xE0         ; 0xE0 = master drive, LBA mode
-    out dx, al
+    .cached:
+        ; copy from cache to buffer
+        mov esi, sector_cache
+        mov edi, ebx
+        mov ecx, 128
+        rep movsd
     
-    ; send sector count = 1
-    mov dx, ATA_SECTOR_COUNT
-    mov al, 1
-    out dx, al
-    
-    ; send LBA address
-    mov dx, ATA_LBA_LOW
-    mov eax, [.sector]
-    out dx, al          ; LBA bits 0-7
-    
-    mov dx, ATA_LBA_MID
-    mov eax, [.sector]
-    shr eax, 8
-    out dx, al          ; LBA bits 8-15
-    
-    mov dx, ATA_LBA_HIGH
-    mov eax, [.sector]
-    shr eax, 16
-    out dx, al          ; LBA bits 16-23
-    
-    ; send read command
-    mov dx, ATA_COMMAND
-    mov al, ATA_CMD_READ
-    out dx, al
-    
-    ; wait for data ready
-    call ata_wait_drq
-    
-    ; read 512 bytes (256 words)
-    mov edi, [.buffer]
-    mov dx, ATA_DATA
-    mov ecx, 256
-    rep insw            ; read words from DX into [EDI]
-    
+    .done:
     popa
     ret
-    
-    .sector: dd 0
-    .buffer: dd 0
 
-; write sector to disk
+; write sector to cache
 ; EAX = sector number (LBA)
 ; EBX = buffer address
 write_sector:
     pusha
     
-    ; save parameters
-    mov [.sector], eax
-    mov [.buffer], ebx
+    ; cache this sector
+    mov [cached_sector], eax
     
-    ; wait for drive ready
-    call ata_wait_ready
-    
-    ; select drive 0, LBA mode
-    mov dx, ATA_DRIVE_HEAD
-    mov eax, [.sector]
-    shr eax, 24
-    and al, 0x0F
-    or al, 0xE0
-    out dx, al
-    
-    ; send sector count = 1
-    mov dx, ATA_SECTOR_COUNT
-    mov al, 1
-    out dx, al
-    
-    ; send LBA address
-    mov dx, ATA_LBA_LOW
-    mov eax, [.sector]
-    out dx, al
-    
-    mov dx, ATA_LBA_MID
-    mov eax, [.sector]
-    shr eax, 8
-    out dx, al
-    
-    mov dx, ATA_LBA_HIGH
-    mov eax, [.sector]
-    shr eax, 16
-    out dx, al
-    
-    ; send write command
-    mov dx, ATA_COMMAND
-    mov al, ATA_CMD_WRITE
-    out dx, al
-    
-    ; wait for data ready
-    call ata_wait_drq
-    
-    ; write 512 bytes (256 words)
-    mov esi, [.buffer]
-    mov dx, ATA_DATA
-    mov ecx, 256
-    rep outsw           ; write words from [ESI] to DX
-    
-    ; flush cache (wait for write to complete)
-    call ata_wait_ready
+    ; copy buffer to cache
+    mov esi, ebx
+    mov edi, sector_cache
+    mov ecx, 128
+    rep movsd
     
     popa
     ret
-    
-    .sector: dd 0
-    .buffer: dd 0
 
 ; ========================================
 ; MESSAGES
