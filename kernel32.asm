@@ -200,6 +200,13 @@ init_idt:
     shr eax, 16
     mov [edi+6], ax
     
+    ; network (RTL8139) on IRQ11 (INT 0x2B)
+    mov edi, idt_table + (0x2B * 8)
+    mov eax, irq11_handler
+    mov [edi], ax
+    shr eax, 16
+    mov [edi+6], ax
+    
     ; system call on INT 0x80
     mov edi, idt_table + (0x80 * 8)
     mov eax, syscall_handler
@@ -242,10 +249,10 @@ init_pic:
     out 0x21, al
     out 0xA1, al
     
-    ; only enable timer and keyboard
+    ; enable timer, keyboard, and IRQ11 (network)
     mov al, 0xFC        ; IRQ0 and IRQ1 enabled
     out 0x21, al
-    mov al, 0xFF        ; mask all slave IRQs
+    mov al, 0xF7        ; IRQ11 enabled (bit 3 = 0)
     out 0xA1, al
     ret
 
@@ -636,6 +643,12 @@ rtl8139_found:    db 0
 rtl8139_io_base:  dd 0
 rtl8139_mac:      times 6 db 0
 rtl8139_rx_buffer: dd 0
+
+; Network stack buffers and variables
+rtl8139_tx_buffer_data: times 2048 db 0
+rtl8139_rx_buffer_data: times (8192 + 16) db 0
+rtl8139_tx_current: dd 0
+rtl8139_rx_ptr: dd 0
 
 ; find and initialize RTL8139
 init_rtl8139:
@@ -1582,6 +1595,7 @@ swap_page_in:
         ret
 
 %include "swap_system.asm"
+%include "network.asm"
 
 ; compress multiple cold pages (for memory pressure)
 compress_cold_pages:
@@ -2238,6 +2252,41 @@ irq1_handler:
         popa
         iret
 
+; IRQ11 handler (network card)
+irq11_handler:
+    pusha
+    
+    ; Check if it's RTL8139
+    mov edx, [rtl8139_io_base]
+    test edx, edx
+    jz .not_rtl8139
+    
+    ; Check interrupt status
+    add edx, 0x3E           ; ISR register
+    in ax, dx
+    test ax, 0x01           ; RX OK
+    jz .not_rx
+    
+    ; Handle received packet
+    call rtl8139_handle_rx
+    
+    ; Clear interrupt
+    mov edx, [rtl8139_io_base]
+    add edx, 0x3E
+    mov ax, 0x01
+    out dx, ax
+    
+    .not_rx:
+    .not_rtl8139:
+    
+    ; tell both PICs we're done (IRQ11 is on slave PIC)
+    mov al, 0x20
+    out 0xA0, al            ; Slave PIC
+    out 0x20, al            ; Master PIC
+    
+    popa
+    iret
+
 getchar:
     ; returns character in AL or 0 if nothing there
     push ebx
@@ -2618,6 +2667,21 @@ process_command:
     test eax, eax
     jz .show_swap
     
+    ; is it ":netstats"?
+    mov esi, cmd_buffer
+    mov edi, cmd_netstats
+    call strcmp
+    test eax, eax
+    jz .show_netstats
+    
+    ; is it ":ping"?
+    mov esi, cmd_buffer
+    mov edi, cmd_ping
+    mov ecx, 6              ; check first 6 chars ":ping "
+    call strncmp
+    test eax, eax
+    jz .do_ping
+    
     ; is it ":say"?
     mov esi, cmd_buffer
     mov edi, cmd_say
@@ -2832,6 +2896,8 @@ process_command:
     
     .init_network:
         call init_rtl8139
+        call init_rtl8139_network
+        call show_network_stats
         jmp .done
     
     .show_pages:
@@ -2840,6 +2906,19 @@ process_command:
     
     .show_swap:
         call show_swap_info
+        jmp .done
+    
+    .show_netstats:
+        call show_network_stats
+        jmp .done
+    
+    .do_ping:
+        ; Parse IP address from command
+        ; For now, just ping gateway (10.0.2.1)
+        mov eax, [GATEWAY_IP]
+        call send_ping
+        mov esi, msg_ping_sent
+        call print_string
         jmp .done
     
     .do_reboot:
@@ -3221,6 +3300,8 @@ msg_help_text:  db 'All commands use : prefix!', 10, 10
                 db '  :syscall - Test system calls', 10
                 db '  :tasks  - Show task info', 10
                 db '  :net    - Initialize network', 10
+                db '  :netstats - Network statistics', 10
+                db '  :ping   - Ping gateway (10.0.2.1)', 10
                 db '  :pages  - Page memory statistics', 10
                 db '  :swap   - Swap space info', 10
                 db '  :say    - Echo your text', 10
@@ -3237,6 +3318,7 @@ msg_time_text:  db 'Timer ticks: 0x', 0
 msg_mem_text:   db 'Memory: 32MB (0x00000000 - 0x02000000)', 10
                 db 'Kernel at 0x10000, Stack at 0x90000', 10, 0
 msg_reboot_text: db 'Rebooting...', 10, 0
+msg_ping_sent:   db 'Ping sent! (waiting for reply...)', 10, 0
 msg_ver_text:   db 'j3kOS v1.0 - 32-bit Protected Mode', 10
                 db 'by jortboy3k (@jortboy3k)', 10, 0
 msg_echo:       db '  ...', 0
@@ -3269,6 +3351,8 @@ cmd_tasks:      db ':tasks', 0
 cmd_net:        db ':net', 0
 cmd_pages:      db ':pages', 0
 cmd_swap:       db ':swap', 0
+cmd_netstats:   db ':netstats', 0
+cmd_ping:       db ':ping', 0
 cmd_say:        db ':say ', 0
 
 msg_year_prefix: db '20', 0

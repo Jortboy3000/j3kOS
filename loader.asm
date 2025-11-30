@@ -18,9 +18,9 @@ start:
     call print_string
     
     ; load the actual 32-bit kernel from disk
-    ; sector 12, grab 40 sectors to 0x10000
+    ; sector 12, grab 80 sectors to 0x10000
     mov ah, 0x02        ; read sectors
-    mov al, 40          ; 40 sectors worth of kernel (20KB)
+    mov al, 80          ; 80 sectors worth of kernel (40KB)
     mov ch, 0           ; cylinder 0
     mov cl, 12          ; sector 12
     mov dh, 0           ; head 0
