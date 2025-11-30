@@ -1596,6 +1596,7 @@ swap_page_in:
 
 %include "swap_system.asm"
 %include "network.asm"
+%include "graphics.asm"
 
 ; compress multiple cold pages (for memory pressure)
 compress_cold_pages:
@@ -2674,6 +2675,22 @@ process_command:
     test eax, eax
     jz .show_netstats
     
+    ; is it ":gfx"?
+    mov esi, cmd_buffer
+    mov edi, cmd_gfx
+    mov ecx, 4
+    call strncmp
+    test eax, eax
+    jz .do_gfx
+    
+    ; is it ":text"?
+    mov esi, cmd_buffer
+    mov edi, cmd_text
+    mov ecx, 5
+    call strncmp
+    test eax, eax
+    jz .do_text
+    
     ; is it ":ping"?
     mov esi, cmd_buffer
     mov edi, cmd_ping
@@ -2910,6 +2927,22 @@ process_command:
     
     .show_netstats:
         call show_network_stats
+        jmp .done
+    
+    .do_gfx:
+        ; switch to graphics mode
+        call set_graphics_mode
+        call graphics_demo
+        jmp .done
+    
+    .do_text:
+        ; go back to text mode
+        call set_text_mode
+        
+        ; re-initialize text mode display
+        call clear_screen
+        mov esi, msg_text_mode
+        call print_string
         jmp .done
     
     .do_ping:
@@ -3304,6 +3337,8 @@ msg_help_text:  db 'All commands use : prefix!', 10, 10
                 db '  :ping   - Ping gateway (10.0.2.1)', 10
                 db '  :pages  - Page memory statistics', 10
                 db '  :swap   - Swap space info', 10
+                db '  :gfx    - Switch to graphics mode', 10
+                db '  :text   - Return to text mode', 10
                 db '  :say    - Echo your text', 10
                 db '  :reboot - Restart system', 10, 10
                 db 'Files:', 10
@@ -3319,6 +3354,7 @@ msg_mem_text:   db 'Memory: 32MB (0x00000000 - 0x02000000)', 10
                 db 'Kernel at 0x10000, Stack at 0x90000', 10, 0
 msg_reboot_text: db 'Rebooting...', 10, 0
 msg_ping_sent:   db 'Ping sent! (waiting for reply...)', 10, 0
+msg_text_mode:   db 'Back to text mode baby!', 10, 0
 msg_ver_text:   db 'j3kOS v1.0 - 32-bit Protected Mode', 10
                 db 'by jortboy3k (@jortboy3k)', 10, 0
 msg_echo:       db '  ...', 0
@@ -3353,6 +3389,8 @@ cmd_pages:      db ':pages', 0
 cmd_swap:       db ':swap', 0
 cmd_netstats:   db ':netstats', 0
 cmd_ping:       db ':ping', 0
+cmd_gfx:        db ':gfx', 0
+cmd_text:       db ':text', 0
 cmd_say:        db ':say ', 0
 
 msg_year_prefix: db '20', 0
