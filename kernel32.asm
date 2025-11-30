@@ -1605,6 +1605,7 @@ swap_page_in:
 %include "network.asm"
 %include "graphics.asm"
 %include "gui.asm"
+%include "j3kfs.asm"
 
 ; compress multiple cold pages (for memory pressure)
 compress_cold_pages:
@@ -2743,6 +2744,22 @@ process_command:
     test eax, eax
     jz .do_say
     
+    ; is it ":format"?
+    mov esi, cmd_buffer
+    mov edi, cmd_format
+    mov ecx, 7
+    call strncmp
+    test eax, eax
+    jz .do_format
+    
+    ; is it ":mount"?
+    mov esi, cmd_buffer
+    mov edi, cmd_mount
+    mov ecx, 6
+    call strncmp
+    test eax, eax
+    jz .do_mount
+    
     ; :list or :show
     mov esi, cmd_buffer
     mov edi, cmd_list
@@ -3069,6 +3086,20 @@ process_command:
             call print_char
             jmp .done
     
+    .do_format:
+        ; format disk with J3KFS
+        mov esi, msg_formatting
+        call print_string
+        call format_j3kfs
+        mov esi, msg_fs_formatted
+        call print_string
+        jmp .done
+    
+    .do_mount:
+        ; mount J3KFS
+        call mount_j3kfs
+        jmp .done
+    
     .fs_list:
         mov esi, msg_fs_list_header
         call print_string
@@ -3383,6 +3414,8 @@ msg_help_text:  db 'All commands use : prefix!', 10, 10
                 db '  :gfx    - Switch to graphics mode', 10
                 db '  :gui    - GUI demo with mouse', 10
                 db '  :text   - Return to text mode', 10
+                db '  :format - Format disk with J3KFS', 10
+                db '  :mount  - Mount J3KFS file system', 10
                 db '  :say    - Echo your text', 10
                 db '  :reboot - Restart system', 10, 10
                 db 'Files:', 10
@@ -3399,6 +3432,7 @@ msg_mem_text:   db 'Memory: 32MB (0x00000000 - 0x02000000)', 10
 msg_reboot_text: db 'Rebooting...', 10, 0
 msg_ping_sent:   db 'Ping sent! (waiting for reply...)', 10, 0
 msg_text_mode:   db 'Back to text mode baby!', 10, 0
+msg_formatting:  db 'Formatting disk with J3KFS...', 10, 0
 msg_ver_text:   db 'j3kOS v1.0 - 32-bit Protected Mode', 10
                 db 'by jortboy3k (@jortboy3k)', 10, 0
 msg_echo:       db '  ...', 0
@@ -3436,6 +3470,8 @@ cmd_ping:       db ':ping', 0
 cmd_gfx:        db ':gfx', 0
 cmd_gui:        db ':gui', 0
 cmd_text:       db ':text', 0
+cmd_format:     db ':format', 0
+cmd_mount:      db ':mount', 0
 cmd_say:        db ':say ', 0
 
 msg_year_prefix: db '20', 0
