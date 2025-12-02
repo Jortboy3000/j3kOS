@@ -7,10 +7,14 @@
 
 j3kOS is my custom x86 OS that boots into 32-bit protected mode without shitting itself like your average JavaScript framework. It's got proper flat memory, interrupts that don't crash every 5 seconds, and drivers that actually work. Built this entire thing in raw assembly because modern devs are too scared to touch anything below Python.
 
-## Recent Updates (Nov 2025)
+## Recent Updates (Dec 2025)
 
 ### NEW SHIT:
-- **60KB kernel** - Optimized the fuck out of this, removed bloat
+- **113KB kernel** - Yeah it's huge now, deal with it. Dynamic loader handles it fine.
+- **Proper Login Screen** - "Security Theater" to keep the plebs out (fake as fuck but looks cool).
+- **Hardware Cursor** - Fixed the blinking block so it actually syncs with where you type. Made it a thick block because thin lines are for weaklings.
+- **Text Editor** - `edit <filename>` actually works now. Vi-style? Nano-style? Who cares, it writes bytes.
+- **Organized Help** - Grouped commands so you don't have to read a wall of text like a caveman.
 - **Modular architecture** - Network extensions as loadable modules
 - **`:loadnet` command** - Load TCP/HTTP/JSON/REST API at runtime
 - **Fixed boot loader** - No more triple faults and boot loops

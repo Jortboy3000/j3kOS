@@ -84,6 +84,9 @@ kernel_start:
     
     call vmm_init               ; Initialize virtual memory manager
     
+    ; Enable the cool cursor
+    call enable_cursor
+    
     sti
     
     ; skip sound in safe mode
@@ -108,7 +111,7 @@ kernel_start:
     hlt
 
 ; ========================================
-; LOGIN - SECURITY THEATER
+; LOGIN - SECURITY THEATER (fake as fuck)
 ; ========================================
 login_username: times 32 db 0
 login_password: times 32 db 0
@@ -122,24 +125,24 @@ login_main:
         mov esi, msg_login_prompt
         call print_string
         
-        ; read username
+        ; read username (who are you?)
         mov ebx, login_username
         mov ecx, 32
         call read_line
         
-        ; check if empty
+        ; check if empty (don't be stupid)
         cmp byte [login_username], 0
         je .retry
         
         mov esi, msg_pass_prompt
         call print_string
         
-        ; read password (masked)
+        ; read password (masked so nobody sees your hunter2)
         mov ebx, login_password
         mov ecx, 32
         call read_line_masked
         
-        ; for now, accept anything
+        ; for now, accept anything because I don't care
         
         call print_newline
         mov esi, msg_welcome_user
@@ -151,7 +154,7 @@ login_main:
         
         ret
 
-; Helper to read a line of text
+; Helper to read a line of text because users can't type
 read_line:
     ; EBX = buffer, ECX = max len
     pusha
@@ -182,6 +185,7 @@ read_line:
         mov al, ' '
         call print_char
         dec dword [cursor_x]
+        call update_cursor
         jmp .loop
         
     .done:
@@ -191,7 +195,7 @@ read_line:
         popa
         ret
 
-; Helper to read a line masked (*)
+; Helper to read a line masked (*) - top secret shit
 read_line_masked:
     ; EBX = buffer, ECX = max len
     pusha
@@ -223,6 +227,7 @@ read_line_masked:
         mov al, ' '
         call print_char
         dec dword [cursor_x]
+        call update_cursor
         jmp .loop
         
     .done:
@@ -252,6 +257,7 @@ clear_screen:
     rep stosw
     mov dword [cursor_x], 0
     mov dword [cursor_y], 0
+    call update_cursor
     popa
     ret
 
@@ -290,7 +296,7 @@ print_char:
     ; move cursor
     inc dword [cursor_x]
     cmp dword [cursor_x], VGA_WIDTH
-    jl .done
+    jl .update_cursor_pos
     
     .newline:
         mov dword [cursor_x], 0
@@ -298,9 +304,12 @@ print_char:
         
         ; scroll if we hit the bottom
         cmp dword [cursor_y], VGA_HEIGHT
-        jl .done
+        jl .update_cursor_pos
         call scroll_screen
         dec dword [cursor_y]
+    
+    .update_cursor_pos:
+        call update_cursor
     
     .done:
         popa
@@ -318,6 +327,60 @@ scroll_screen:
     mov ecx, VGA_WIDTH
     mov ax, 0x0F20
     rep stosw
+    popa
+    ret
+
+; ========================================
+; CURSOR MANAGEMENT - MAKE IT BLINK
+; ========================================
+enable_cursor:
+    pusha
+    ; Set cursor shape (scanlines 13-15 = thick block)
+    mov dx, 0x3D4
+    mov al, 0x0A
+    out dx, al
+    
+    inc dx
+    mov al, 13          ; Start scanline
+    out dx, al
+    
+    dec dx
+    mov al, 0x0B
+    out dx, al
+    
+    inc dx
+    mov al, 15          ; End scanline
+    out dx, al
+    popa
+    ret
+
+update_cursor:
+    pusha
+    ; Calculate linear position: y * 80 + x
+    mov eax, [cursor_y]
+    mov ebx, VGA_WIDTH
+    mul ebx
+    add eax, [cursor_x]
+    mov ebx, eax
+    
+    ; Set low byte
+    mov dx, 0x3D4
+    mov al, 0x0F
+    out dx, al
+    
+    inc dx
+    mov al, bl
+    out dx, al
+    
+    ; Set high byte
+    dec dx
+    mov al, 0x0E
+    out dx, al
+    
+    inc dx
+    mov al, bh
+    out dx, al
+    
     popa
     ret
 
@@ -1922,17 +1985,12 @@ swap_page_in:
 %include "network.asm"        ; Basic network stack (ARP, ICMP)
 %include "graphics.asm"       ; VGA graphics modes
 %include "gui.asm"            ; Basic GUI widgets
-%include "j3kfs.asm"          ; j3kOS filesystem
-%include "sound.asm"          ; PC speaker beep
-%include "vmm.asm"            ; Virtual Memory Manager (paging)
+%include "j3kfs.asm"          ; file system (stores your garbage)
+%include "sound.asm"          ; annoying beep noises
+%include "vmm.asm"            ; virtual memory magic (don't touch it)
+%include "editor.asm"         ; the goddamn text editor
 
-; Advanced networking disabled to save space
-; Re-enable when implementing full network stack
-; %include "tcp.asm"          ; TCP/IP protocol stack
-; %include "http.asm"         ; HTTP client/server
-; %include "json.asm"         ; JSON parser
-; %include "rest_api.asm"     ; REST API interface
-; %include "editor.asm"       ; Text editor
+; Advanced networking disabled because I'm lazy
 
 ; compress multiple cold pages (for memory pressure)
 compress_cold_pages:
@@ -2884,6 +2942,7 @@ shell_main:
         
         ; move cursor back again
         dec dword [cursor_x]
+        call update_cursor
         jmp .loop
     
     .execute:
@@ -3270,36 +3329,35 @@ process_command:
     test eax, eax
     jz .fs_delete
     
-    mov esi, cmd_buffer
-    mov edi, cmd_rm
+    mov esi, cmd_rm
     mov ecx, 4
     call strncmp
     test eax, eax
     jz .fs_delete
     
-    ; :edit or :vi or :nano - DISABLED (editor too large)
-    ; mov esi, cmd_buffer
-    ; mov edi, cmd_edit
-    ; mov ecx, 6
-    ; call strncmp
-    ; test eax, eax
-    ; jz .do_edit
+    ; :edit or :vi or :nano (for the nerds)
+    mov esi, cmd_buffer
+    mov edi, cmd_edit
+    mov ecx, 6
+    call strncmp
+    test eax, eax
+    jz .do_edit
     
-    ; mov esi, cmd_buffer
-    ; mov edi, cmd_vi
-    ; mov ecx, 4
-    ; call strncmp
-    ; test eax, eax
-    ; jz .do_edit
+    mov esi, cmd_buffer
+    mov edi, cmd_vi
+    mov ecx, 4
+    call strncmp
+    test eax, eax
+    jz .do_edit
     
-    ; mov esi, cmd_buffer
-    ; mov edi, cmd_nano
-    ; mov ecx, 6
-    ; call strncmp
-    ; test eax, eax
-    ; jz .do_edit
+    mov esi, cmd_buffer
+    mov edi, cmd_nano
+    mov ecx, 6
+    call strncmp
+    test eax, eax
+    jz .do_edit
     
-    ; unknown command
+    ; unknown command (user is an idiot)
     mov esi, msg_unknown
     call print_string
     jmp .done
@@ -3959,37 +4017,37 @@ process_command:
             call print_string
             jmp .done
     
-    ; .do_edit:  ; DISABLED - editor too large
+    .do_edit:
         ; check if filename provided
-        ; cmp dword [cmd_length], 6
-        ; jle .edit_new_file
-        ; 
+        cmp dword [cmd_length], 6
+        jle .edit_new_file
+        
         ; get filename (skip ":edit " or ":vi " or ":nano ")
-        ; mov esi, cmd_buffer
-        ; add esi, 6
-        ; 
+        mov esi, cmd_buffer
+        add esi, 6
+        
         ; skip any extra spaces
-        ; .skip_spaces:
-        ;     lodsb
-        ;     cmp al, ' '
-        ;     je .skip_spaces
-        ;     dec esi
-        ; 
-        ; call editor_main
-        ; 
+        .skip_spaces:
+            lodsb
+            cmp al, ' '
+            je .skip_spaces
+            dec esi
+        
+        call editor_main
+        
         ; redraw screen after editor
-        ; call clear_screen
-        ; mov esi, msg_ready
-        ; call print_string
-        ; jmp .done
-        ; 
-        ; .edit_new_file:
-        ;     xor esi, esi        ; null for new file
-        ;     call editor_main
-        ;     call clear_screen
-        ;     mov esi, msg_ready
-        ;     call print_string
-        ;     jmp .done
+        call clear_screen
+        mov esi, msg_ready
+        call print_string
+        jmp .done
+        
+        .edit_new_file:
+            xor esi, esi        ; null for new file
+            call editor_main
+            call clear_screen
+            mov esi, msg_ready
+            call print_string
+            jmp .done
     
     .done:
         ret
@@ -4077,15 +4135,29 @@ msg_init_page_ok: db '[INIT] Page Mgmt OK', 10, 0
 msg_ready:      db 'System ready. Type "help" for commands.', 10, 10, 0
 msg_prompt:     db '> ', 0
 msg_unknown:    db 'Unknown command. Type "help" for list.', 10, 0
-msg_help_text:  db 'j3kOS commands (: optional):', 10, 10
-                db 'help, clear, ver, reboot, time, datetime, mem, pci', 10
-                db 'gfx, gui, text, beep, say <text>', 10
-                db 'net, netstats, ping <ip>', 10
-                db 'loadnet (load network extensions)', 10
-                db 'format, mount, ls, read <f>, write <f> <t>, del <f>', 10
-                db 'pages, swap, tasks', 10
-                db 'malloc, vmm, vmalloc, vmap', 10
-                db 'compress, decompress (test hot/cold page compression)', 10, 0
+msg_help_text:  db 'j3kOS Help Menu', 10
+                db '===============', 10, 10
+                db '[System]', 10
+                db '  help, clear, ver, reboot', 10
+                db '  time, datetime, timezone', 10
+                db '  mem, pci, tasks, syscall', 10, 10
+                db '[Filesystem]', 10
+                db '  ls, cat <f>, edit <f>', 10
+                db '  make <f>, del <f>', 10
+                db '  write <f> <t>', 10
+                db '  format, mount', 10, 10
+                db '[Network]', 10
+                db '  net, netstats, ping <ip>', 10
+                db '  loadnet', 10, 10
+                db '[Memory]', 10
+                db '  malloc, free, vmm', 10
+                db '  vmalloc, vmap, paging', 10
+                db '  pages, swap', 10
+                db '  compress, decompress', 10, 10
+                db '[Media/GUI]', 10
+                db '  gfx, gui, text', 10
+                db '  beep, say <text>', 10, 10
+                db "Type commands with or without ':'", 10, 0
 msg_time_text:  db 'Timer ticks: 0x', 0
 msg_mem_text:   db '32MB ram, kernel @ 0x10000, stack @ 0x90000', 10, 0
 msg_reboot_text: db 'rebooting...', 10, 0
