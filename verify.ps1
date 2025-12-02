@@ -20,9 +20,9 @@ if ($img.Length -lt 6144) {
     exit 1
 }
 
-# Validate maximum size (128KB = reasonable upper limit for now)
-if ($img.Length -gt 131072) {
-    Write-Host "  [ERROR] Image too large! Maximum 128KB." -ForegroundColor Red
+# Validate maximum size (1.44MB = 1474560 bytes)
+if ($img.Length -gt 1474560) {
+    Write-Host "  [ERROR] Image too large! Maximum 1.44MB." -ForegroundColor Red
     exit 1
 }
 

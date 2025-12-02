@@ -9,6 +9,24 @@
 VGA_MEMORY          equ 0xA0000
 VGA_PIXELS          equ 64000       ; 320 * 200
 
+; VGA Ports
+VGA_AC_INDEX        equ 0x3C0
+VGA_AC_WRITE        equ 0x3C0
+VGA_AC_READ         equ 0x3C1
+VGA_MISC_WRITE      equ 0x3C2
+VGA_SEQ_INDEX       equ 0x3C4
+VGA_SEQ_DATA        equ 0x3C5
+VGA_DAC_MASK        equ 0x3C6
+VGA_DAC_READ        equ 0x3C7
+VGA_DAC_WRITE       equ 0x3C8
+VGA_DAC_DATA        equ 0x3C9
+VGA_MISC_READ       equ 0x3CC
+VGA_GC_INDEX        equ 0x3CE
+VGA_GC_DATA         equ 0x3CF
+VGA_CRTC_INDEX      equ 0x3D4
+VGA_CRTC_DATA       equ 0x3D5
+VGA_INSTAT_READ     equ 0x3DA
+
 ; current video mode (0 = text, 1 = graphics)
 video_mode: db 0
 
@@ -35,30 +53,432 @@ COLOR_WHITE         equ 15
 ; ========================================
 
 ; switch to graphics mode (320x200x256)
+; DIRECT REGISTER WRITE VERSION (Protected Mode Safe)
 set_graphics_mode:
     pusha
     
-    ; BIOS int 10h, AH=0, AL=13h
-    mov ax, 0x0013
-    int 0x10
+    ; 1. MISC OUTPUT
+    mov dx, VGA_MISC_WRITE
+    mov al, 0x63
+    out dx, al
+    
+    ; 2. SEQUENCER
+    ; Reset sequencer
+    mov dx, VGA_SEQ_INDEX
+    mov al, 0x00
+    out dx, al
+    mov dx, VGA_SEQ_DATA
+    mov al, 0x03
+    out dx, al
+    
+    ; Clock mode
+    mov dx, VGA_SEQ_INDEX
+    mov al, 0x01
+    out dx, al
+    mov dx, VGA_SEQ_DATA
+    mov al, 0x01
+    out dx, al
+    
+    ; Map mask
+    mov dx, VGA_SEQ_INDEX
+    mov al, 0x02
+    out dx, al
+    mov dx, VGA_SEQ_DATA
+    mov al, 0x0F
+    out dx, al
+    
+    ; Char map select
+    mov dx, VGA_SEQ_INDEX
+    mov al, 0x03
+    out dx, al
+    mov dx, VGA_SEQ_DATA
+    mov al, 0x00
+    out dx, al
+    
+    ; Memory mode
+    mov dx, VGA_SEQ_INDEX
+    mov al, 0x04
+    out dx, al
+    mov dx, VGA_SEQ_DATA
+    mov al, 0x0E
+    out dx, al
+    
+    ; End reset
+    mov dx, VGA_SEQ_INDEX
+    mov al, 0x00
+    out dx, al
+    mov dx, VGA_SEQ_DATA
+    mov al, 0x03
+    out dx, al
+    
+    ; 3. CRTC
+    ; Unlock CRTC
+    mov dx, VGA_CRTC_INDEX
+    mov al, 0x11
+    out dx, al
+    mov dx, VGA_CRTC_DATA
+    in al, dx
+    and al, 0x7F
+    out dx, al
+    
+    ; Write CRTC registers
+    mov esi, .crtc_regs_13h
+    mov ecx, 25
+    mov bl, 0
+    .crtc_loop:
+        mov dx, VGA_CRTC_INDEX
+        mov al, bl
+        out dx, al
+        
+        mov dx, VGA_CRTC_DATA
+        mov al, [esi]
+        out dx, al
+        
+        inc esi
+        inc bl
+        loop .crtc_loop
+        
+    ; 4. GRAPHICS CONTROLLER
+    mov esi, .gc_regs_13h
+    mov ecx, 9
+    mov bl, 0
+    .gc_loop:
+        mov dx, VGA_GC_INDEX
+        mov al, bl
+        out dx, al
+        
+        mov dx, VGA_GC_DATA
+        mov al, [esi]
+        out dx, al
+        
+        inc esi
+        inc bl
+        loop .gc_loop
+        
+    ; 5. ATTRIBUTE CONTROLLER
+    ; Reset flip-flop
+    mov dx, VGA_INSTAT_READ
+    in al, dx
+    
+    mov esi, .ac_regs_13h
+    mov ecx, 20
+    mov bl, 0
+    .ac_loop:
+        mov dx, VGA_AC_INDEX
+        mov al, bl
+        out dx, al
+        
+        mov al, [esi]
+        out dx, al
+        
+        inc esi
+        inc bl
+        loop .ac_loop
+        
+    ; Enable video
+    mov dx, VGA_AC_INDEX
+    mov al, 0x20
+    out dx, al
     
     ; we're in graphics mode now
     mov byte [video_mode], 1
     
     popa
     ret
+    
+    ; Register values for Mode 13h (320x200x256)
+    .crtc_regs_13h:
+        db 0x5F, 0x4F, 0x50, 0x82, 0x54, 0x80, 0xBF, 0x1F
+        db 0x00, 0x41, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+        db 0x9C, 0x0E, 0x8F, 0x28, 0x40, 0x96, 0xB9, 0xA3
+        db 0xFF
+        
+    .gc_regs_13h:
+        db 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x05, 0x0F
+        db 0xFF
+        
+    .ac_regs_13h:
+        db 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07
+        db 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F
+        db 0x41, 0x00, 0x0F, 0x00
 
 ; go back to text mode
+; DIRECT REGISTER WRITE VERSION (Protected Mode Safe)
 set_text_mode:
     pusha
     
-    ; BIOS int 10h, AH=0, AL=3 (80x25 text)
-    mov ax, 0x0003
-    int 0x10
+    ; 1. MISC OUTPUT
+    mov dx, VGA_MISC_WRITE
+    mov al, 0x67
+    out dx, al
+    
+    ; 2. SEQUENCER
+    ; Reset
+    mov dx, VGA_SEQ_INDEX
+    mov al, 0x00
+    out dx, al
+    mov dx, VGA_SEQ_DATA
+    mov al, 0x03
+    out dx, al
+    
+    ; Write regs
+    mov esi, .seq_regs_03h
+    mov ecx, 4
+    mov bl, 1
+    .seq_loop_text:
+        mov dx, VGA_SEQ_INDEX
+        mov al, bl
+        out dx, al
+        
+        mov dx, VGA_SEQ_DATA
+        mov al, [esi]
+        out dx, al
+        
+        inc esi
+        inc bl
+        loop .seq_loop_text
+        
+    ; End reset
+    mov dx, VGA_SEQ_INDEX
+    mov al, 0x00
+    out dx, al
+    mov dx, VGA_SEQ_DATA
+    mov al, 0x03
+    out dx, al
+    
+    ; 3. CRTC
+    ; Unlock
+    mov dx, VGA_CRTC_INDEX
+    mov al, 0x11
+    out dx, al
+    mov dx, VGA_CRTC_DATA
+    in al, dx
+    and al, 0x7F
+    out dx, al
+    
+    ; Write regs
+    mov esi, .crtc_regs_03h
+    mov ecx, 25
+    mov bl, 0
+    .crtc_loop_text:
+        mov dx, VGA_CRTC_INDEX
+        mov al, bl
+        out dx, al
+        
+        mov dx, VGA_CRTC_DATA
+        mov al, [esi]
+        out dx, al
+        
+        inc esi
+        inc bl
+        loop .crtc_loop_text
+        
+    ; 4. GRAPHICS CONTROLLER
+    mov esi, .gc_regs_03h
+    mov ecx, 9
+    mov bl, 0
+    .gc_loop_text:
+        mov dx, VGA_GC_INDEX
+        mov al, bl
+        out dx, al
+        
+        mov dx, VGA_GC_DATA
+        mov al, [esi]
+        out dx, al
+        
+        inc esi
+        inc bl
+        loop .gc_loop_text
+        
+    ; 5. ATTRIBUTE CONTROLLER
+    mov dx, VGA_INSTAT_READ
+    in al, dx
+    
+    mov esi, .ac_regs_03h
+    mov ecx, 20
+    mov bl, 0
+    .ac_loop_text:
+        mov dx, VGA_AC_INDEX
+        mov al, bl
+        out dx, al
+        
+        mov al, [esi]
+        out dx, al
+        
+        inc esi
+        inc bl
+        loop .ac_loop_text
+        
+    ; Enable video
+    mov dx, VGA_AC_INDEX
+    mov al, 0x20
+    out dx, al
+    
+    ; Restore Palette (Standard VGA 16 colors)
+    call restore_palette
+    
+    ; ========================================
+    ; FONT UPLOAD FIX
+    ; We must restore the font data to Plane 2
+    ; ========================================
+    
+    ; 1. Prepare Sequencer for Plane 2 write
+    mov dx, VGA_SEQ_INDEX
+    mov al, 0x02        ; Map Mask
+    out dx, al
+    mov dx, VGA_SEQ_DATA
+    mov al, 0x04        ; Enable Plane 2
+    out dx, al
+    
+    mov dx, VGA_SEQ_INDEX
+    mov al, 0x04        ; Memory Mode
+    out dx, al
+    mov dx, VGA_SEQ_DATA
+    mov al, 0x06        ; Sequential addressing
+    out dx, al
+    
+    ; 2. Prepare Graphics Controller
+    mov dx, VGA_GC_INDEX
+    mov al, 0x04        ; Read Map Select
+    out dx, al
+    mov dx, VGA_GC_DATA
+    mov al, 0x02        ; Plane 2
+    out dx, al
+    
+    mov dx, VGA_GC_INDEX
+    mov al, 0x05        ; Mode Register
+    out dx, al
+    mov dx, VGA_GC_DATA
+    mov al, 0x00        ; Write Mode 0
+    out dx, al
+    
+    mov dx, VGA_GC_INDEX
+    mov al, 0x06        ; Misc Register
+    out dx, al
+    mov dx, VGA_GC_DATA
+    mov al, 0x0C        ; Map at A0000, Graphics mode
+    out dx, al
+    
+    ; 3. Upload Font (8x8)
+    ; We need to write 256 chars * 32 bytes (VGA allocates 32 bytes per char even if 8x8)
+    ; Our font is packed 8 bytes per char. We need to pad with zeros.
+    mov edi, 0xA0000
+    
+    ; Clear font area first (first 8KB)
+    push edi
+    mov ecx, 2048   ; 8192 bytes / 4
+    xor eax, eax
+    rep stosd
+    pop edi
+    
+    ; Copy our font (starts at ASCII 32)
+    ; First 32 chars are blank/control
+    add edi, 32 * 32
+    
+    mov esi, font_8x8
+    mov ecx, 96     ; chars 32-127
+    
+    .font_loop:
+        push ecx
+        
+        ; Copy 8 bytes of font data
+        mov ecx, 8
+        rep movsb
+        
+        ; Pad remaining 24 bytes with zero
+        mov ecx, 24
+        xor al, al
+        rep stosb
+        
+        pop ecx
+        loop .font_loop
+        
+    ; 4. Restore Registers for Text Mode
+    
+    ; Restore Sequencer
+    mov dx, VGA_SEQ_INDEX
+    mov al, 0x02
+    out dx, al
+    mov dx, VGA_SEQ_DATA
+    mov al, 0x03        ; Planes 0,1 enabled
+    out dx, al
+    
+    mov dx, VGA_SEQ_INDEX
+    mov al, 0x04
+    out dx, al
+    mov dx, VGA_SEQ_DATA
+    mov al, 0x02        ; Odd/Even mode
+    out dx, al
+    
+    ; Restore Graphics Controller
+    mov dx, VGA_GC_INDEX
+    mov al, 0x04
+    out dx, al
+    mov dx, VGA_GC_DATA
+    mov al, 0x00
+    out dx, al
+    
+    mov dx, VGA_GC_INDEX
+    mov al, 0x05
+    out dx, al
+    mov dx, VGA_GC_DATA
+    mov al, 0x10        ; Odd/Even
+    out dx, al
+    
+    mov dx, VGA_GC_INDEX
+    mov al, 0x06
+    out dx, al
+    mov dx, VGA_GC_DATA
+    mov al, 0x0E        ; Map at B8000, Text mode
+    out dx, al
     
     ; text mode baby
     mov byte [video_mode], 0
     
+    popa
+    ret
+    
+    ; Register values for Mode 03h (80x25 Text)
+    .seq_regs_03h:
+        db 0x01, 0x03, 0x00, 0x02
+        
+    .crtc_regs_03h:
+        ; Modified for 8x8 font (Index 9 = 0x47 -> 7 scanlines)
+        db 0x5F, 0x4F, 0x50, 0x82, 0x55, 0x81, 0xBF, 0x1F
+        db 0x00, 0x47, 0x0D, 0x0E, 0x00, 0x00, 0x00, 0x00
+        db 0x9C, 0x8E, 0x8F, 0x28, 0x1F, 0x96, 0xB9, 0xA3
+        db 0xFF
+        
+    .gc_regs_03h:
+        db 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x0E, 0x00
+        db 0xFF
+        
+    .ac_regs_03h:
+        db 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x14, 0x07
+        db 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F
+        db 0x0C, 0x00, 0x0F, 0x08
+
+; ========================================
+; PALETTE MANAGEMENT
+; ========================================
+
+; Standard VGA Palette (16 colors)
+standard_palette:
+    db 0,0,0, 0,0,42, 0,42,0, 0,42,42
+    db 42,0,0, 42,0,42, 42,21,0, 42,42,42
+    db 21,21,21, 21,21,63, 21,63,21, 21,63,63
+    db 63,21,21, 63,21,63, 63,63,21, 63,63,63
+
+restore_palette:
+    pusha
+    mov dx, 0x3C8       ; DAC Address Write Mode
+    mov al, 0
+    out dx, al
+    
+    mov dx, 0x3C9       ; DAC Data
+    mov esi, standard_palette
+    mov ecx, 16 * 3     ; 16 colors * 3 bytes
+    rep outsb
     popa
     ret
 
@@ -918,7 +1338,10 @@ draw_char_gfx:
             jge .next_row
             
             ; check if pixel should be drawn
-            mov cl, byte [.col]
+            ; Font is MSB-left (Bit 7 = left, Bit 0 = right)
+            ; So we need to check bit (7 - col)
+            mov cl, 7
+            sub cl, byte [.col]
             mov al, byte [.bitmap]
             shr al, cl
             test al, 1
@@ -995,8 +1418,8 @@ draw_string_gfx:
 graphics_demo:
     pusha
     
-    ; clear screen to dark blue
-    mov al, 17              ; dark blue
+    ; clear screen to dark blue (use color 1 for standard blue)
+    mov al, 1               ; blue
     call clear_graphics_screen
     
     ; draw title text
@@ -1121,9 +1544,87 @@ graphics_demo:
     call draw_sprite_scaled
     add esp, 8
     
+    ; Animation Loop
+    mov dword [.ball_x], 160
+    mov dword [.ball_y], 100
+    mov dword [.ball_dx], 2
+    mov dword [.ball_dy], 2
+    
+    .anim_loop:
+        ; check for keypress (non-blocking)
+        in al, 0x64
+        test al, 1
+        jnz .exit_anim
+        
+        ; erase ball (draw black rect)
+        mov eax, [.ball_x]
+        mov ebx, [.ball_y]
+        mov ecx, eax
+        add ecx, 8
+        mov edx, ebx
+        add edx, 8
+        push 1          ; blue background color
+        call draw_filled_rect
+        add esp, 4
+        
+        ; update position
+        mov eax, [.ball_x]
+        add eax, [.ball_dx]
+        mov [.ball_x], eax
+        
+        mov eax, [.ball_y]
+        add eax, [.ball_dy]
+        mov [.ball_y], eax
+        
+        ; bounce x
+        cmp dword [.ball_x], 0
+        jle .bounce_x
+        cmp dword [.ball_x], 312
+        jge .bounce_x
+        jmp .check_y
+        .bounce_x:
+        neg dword [.ball_dx]
+        
+        .check_y:
+        ; bounce y
+        cmp dword [.ball_y], 0
+        jle .bounce_y
+        cmp dword [.ball_y], 192
+        jge .bounce_y
+        jmp .draw_ball
+        .bounce_y:
+        neg dword [.ball_dy]
+        
+        .draw_ball:
+        ; draw ball (smiley)
+        mov esi, sprite_smiley
+        mov eax, [.ball_x]
+        mov ebx, [.ball_y]
+        mov ecx, 8
+        mov edx, 8
+        push 0
+        call draw_sprite
+        add esp, 4
+        
+        ; delay
+        mov ecx, 50000
+        .delay:
+            nop
+            loop .delay
+            
+        jmp .anim_loop
+        
+    .exit_anim:
+    ; consume the key
+    in al, 0x60
+    
     popa
     ret
     
     .title_text: db 'j3kOS Graphics Demo', 0
     .shapes_label: db 'Shapes', 0
     .sprites_label: db 'Sprites:', 0
+    .ball_x: dd 0
+    .ball_y: dd 0
+    .ball_dx: dd 0
+    .ball_dy: dd 0

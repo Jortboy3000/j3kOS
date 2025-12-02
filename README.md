@@ -85,42 +85,58 @@ j3kOS is my custom x86 OS that boots into 32-bit protected mode without shitting
 - **Task switching**: TSS and basic multitasking
 - **Command history**: Up/down arrows like a real shell
 
-## Shell Commands (all need : prefix)
+## Shell Commands (Western Sydney Edition - No Colons Needed)
 
-```
-:help       - show this shit
-:clear      - clear the screen  
-:time       - timer ticks since boot
-:datetime   - actual date/time from RTC
-:timezone   - set timezone offset (+/-n)
-:mem        - memory info (32MB because we're not poor)
-:ver        - OS version
-:pci        - scan PCI bus for devices
-:malloc     - test allocate 256 bytes
-:syscall    - test INT 0x80 interface
-:tasks      - show task info
-:pages      - show page management stats
-:swap       - show swap space info
-:net        - initialize RTL8139 network card
-:netstats   - show network statistics
-:ping <ip>  - ping an IP address
-:say <msg>  - echo with dramatic effect
-:beep       - make a beep sound
-:gfx        - switch to graphics mode
-:gui        - launch GUI (if you're feeling brave)
-:text       - back to text mode
-:loadnet    - load network extensions module
-:reboot     - restart (triple fault style)
+We finally fixed the shell so you don't have to type `:` like a caveman. Just type the command.
 
-Files (J3KFS):
-:list/:show         - list files
-:make/:create <n>   - create file
-:read/:open <n>     - read file  
-:write <n> <text>   - write to file
-:delete/:remove <n> - delete file
-:format             - format disk with J3KFS
-:mount              - mount filesystem
-```
+### [System]
+- `help`      - show the new menu (Western Sydney Ed.)
+- `clear`     - clear the screen (or `cls` if you're old)
+- `ver`       - show OS version
+- `reboot`    - restart the machine (triple fault style)
+- `time`      - timer ticks since boot
+- `datetime`  - actual date/time from RTC
+- `timezone`  - set timezone offset (+/-n)
+- `mem`       - memory info (32MB because we're not poor)
+- `pci`       - scan PCI bus for devices
+- `tasks`     - show task info
+- `syscall`   - test INT 0x80 interface
+- `echo <txt>`- echo text back (new!)
+
+### [Filesystem] (J3KFS)
+- `ls`        - list files (or `list`, `show`)
+- `cat <f>`   - read file content (or `read`, `open`)
+- `edit <f>`  - open text editor (or `vi`, `nano`)
+- `make <f>`  - create empty file (or `create`)
+- `del <f>`   - delete file (or `rm`, `remove`)
+- `write <f> <t>` - write text to file
+- `format`    - format disk with J3KFS
+- `mount`     - mount filesystem (ram/disk)
+
+### [Network]
+- `net`       - initialize RTL8139 network card
+- `netstats`  - show network statistics
+- `ping <ip>` - ping an IP address
+- `loadnet`   - load network extensions module
+
+### [Memory]
+- `malloc`    - test allocate 256 bytes
+- `free`      - test free
+- `vmm`       - virtual memory manager stats
+- `vmalloc`   - allocate virtual pages
+- `vmap`      - map physical to virtual
+- `paging`    - enable hardware paging
+- `pages`     - show page tables
+- `swap`      - show swap space info
+- `compress`  - test page compression
+- `decompress`- test page decompression
+
+### [Media/GUI]
+- `gfx`       - switch to graphics mode (bouncing ball demo)
+- `gui`       - launch GUI (experimental)
+- `text`      - back to text mode
+- `beep`      - make a beep sound
+- `say <txt>` - echo with dramatic effect
 
 ## Building this clusterfuck
 

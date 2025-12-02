@@ -118,6 +118,13 @@ copy /b boot.bin+loader.bin+kernel32.bin j3kOS.img >nul || (
     exit /b 1
 )
 
+REM Pad image to 1.44MB (2880 sectors) for filesystem support
+echo [PAD] Padding image to 1.44MB (2880 sectors)...
+powershell -NoProfile -Command "$bytes = [IO.File]::ReadAllBytes('j3kOS.img'); $pad = New-Object byte[] 1474560; [Array]::Copy($bytes, $pad, [Math]::Min($bytes.Length, 1474560)); [IO.File]::WriteAllBytes('j3kOS.img', $pad)" || (
+    echo [ERROR] Image padding failed!
+    exit /b 1
+)
+
 REM Verify image
 for %%F in (j3kOS.img) do set IMAGE_SIZE=%%~zF
 set /a IMAGE_SECTORS=!IMAGE_SIZE! / 512

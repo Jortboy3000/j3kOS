@@ -5,21 +5,22 @@
 
 ; File system layout:
 ; Sector 0-11:     Boot + Loader (reserved)
-; Sector 12-91:    Kernel (80 sectors = 40KB)
-; Sector 92:       Superblock
-; Sector 93-108:   Inode table (16 sectors = 128 inodes)
-; Sector 109-140:  Data bitmap (32 sectors = 256KB of data tracking)
-; Sector 141+:     Data blocks (rest of disk)
+; Sector 11-500:   Kernel (Reserved)
+; Sector 501-756:  Swap Space
+; Sector 1000:     Superblock
+; Sector 1001-1016: Inode table (16 sectors = 128 inodes)
+; Sector 1017-1048: Data bitmap (32 sectors = 256KB of data tracking)
+; Sector 1049+:    Data blocks (rest of disk)
 
 ; Constants
 J3KFS_MAGIC         equ 0x4A334B46      ; "J3KF"
 J3KFS_VERSION       equ 1
-SUPERBLOCK_SECTOR   equ 92
-INODE_TABLE_SECTOR  equ 93
+SUPERBLOCK_SECTOR   equ 1000
+INODE_TABLE_SECTOR  equ 1001
 INODE_TABLE_SIZE    equ 16              ; sectors
-DATA_BITMAP_SECTOR  equ 109
+DATA_BITMAP_SECTOR  equ 1017
 DATA_BITMAP_SIZE    equ 32              ; sectors
-DATA_START_SECTOR   equ 141
+DATA_START_SECTOR   equ 1049
 MAX_INODES          equ 128
 MAX_FILENAME        equ 28
 INODE_SIZE          equ 64              ; bytes per inode
@@ -48,8 +49,8 @@ INODE_TYPE_DIR      equ 2
 superblock:
     .magic:             dd J3KFS_MAGIC
     .version:           dd J3KFS_VERSION
-    .total_blocks:      dd 2880             ; 1.44MB floppy
-    .free_blocks:       dd 2739             ; total - reserved
+    .total_blocks:      dd 1880             ; Remaining space on floppy
+    .free_blocks:       dd 1831             ; total - metadata
     .total_inodes:      dd MAX_INODES
     .free_inodes:       dd MAX_INODES - 1   ; root dir uses one
     .inode_table_start: dd INODE_TABLE_SECTOR
@@ -1091,108 +1092,139 @@ list_directory:
 ; ========================================
 
 disk_buffer:        times 512 db 0
+fs_mode:            dd 0        ; 0=disk, 1=ram
+ramdisk_ptr:        dd 0        ; pointer to malloc'd ramdisk
+ramdisk_size:       dd 0x80000  ; 512KB for RAM disk (1024 sectors)
 
-; ========================================
-; DISK I/O (ATA PIO MODE)
-; ========================================
-
-; ATA PIO ports (primary controller)
-ATA_DATA         equ 0x1F0
-ATA_ERROR        equ 0x1F1
-ATA_SECTOR_COUNT equ 0x1F2
-ATA_LBA_LOW      equ 0x1F3
-ATA_LBA_MID      equ 0x1F4
-ATA_LBA_HIGH     equ 0x1F5
-ATA_DRIVE_HEAD   equ 0x1F6
-ATA_STATUS       equ 0x1F7
-ATA_COMMAND      equ 0x1F7
-
-; ATA commands
-ATA_CMD_READ     equ 0x20
-ATA_CMD_WRITE    equ 0x30
-
-; ATA status bits
-ATA_SR_BSY       equ 0x80    ; Busy
-ATA_SR_DRDY      equ 0x40    ; Drive ready
-ATA_SR_DRQ       equ 0x08    ; Data request ready
-ATA_SR_ERR       equ 0x01    ; Error
-
-; wait for ATA drive to be ready
-ata_wait_ready:
-    pusha
-    .wait:
-        mov dx, ATA_STATUS
-        in al, dx
-        test al, ATA_SR_BSY
-        jnz .wait
-    popa
-    ret
-
-; wait for data request
-ata_wait_drq:
-    pusha
-    .wait:
-        mov dx, ATA_STATUS
-        in al, dx
-        test al, ATA_SR_DRQ
-        jz .wait
-    popa
-    ret
-
-; read sector from disk
-; EAX = sector number (LBA)
-; EBX = buffer address
-; ========================================
-; SECTOR CACHE - SINGLE SECTOR BUFFER
-; ========================================
-sector_cache: times 512 db 0
-cached_sector: dd 0xFFFFFFFF    ; -1 means no sector cached
-
-; read sector from cache
+; read sector from disk (REAL DRIVER) or RAM
 ; EAX = sector number (LBA)
 ; EBX = buffer address
 read_sector:
     pusha
+    cmp dword [fs_mode], 1
+    je .ram_read
     
-    ; check if this sector is cached
-    cmp eax, [cached_sector]
-    je .cached
+    ; Disk Read
+    mov edi, ebx        ; kernel driver uses EDI for buffer
+    call read_disk_sector
+    jmp .done
     
-    ; not cached - just return zeros
+    .ram_read:
+    ; check bounds (FS starts at 1000)
+    cmp eax, 1000
+    jl .invalid_lba
+    
+    mov ecx, eax
+    sub ecx, 1000       ; relative sector
+    shl ecx, 9          ; * 512
+    
+    cmp ecx, [ramdisk_size]
+    jae .invalid_lba
+    
+    add ecx, [ramdisk_ptr]
+    mov esi, ecx
+    mov edi, ebx
+    mov ecx, 128
+    rep movsd
+    jmp .done
+    
+    .invalid_lba:
+    ; return zeros
     mov edi, ebx
     mov ecx, 128
     xor eax, eax
     rep stosd
-    jmp .done
-    
-    .cached:
-        ; copy from cache to buffer
-        mov esi, sector_cache
-        mov edi, ebx
-        mov ecx, 128
-        rep movsd
     
     .done:
     popa
     ret
 
-; write sector to cache
+; write sector to disk (REAL DRIVER) or RAM
 ; EAX = sector number (LBA)
 ; EBX = buffer address
 write_sector:
     pusha
+    cmp dword [fs_mode], 1
+    je .ram_write
     
-    ; cache this sector
-    mov [cached_sector], eax
+    ; Disk Write
+    mov edi, ebx        ; kernel driver uses EDI for buffer
+    call write_disk_sector
+    jmp .done
     
-    ; copy buffer to cache
+    .ram_write:
+    ; check bounds
+    cmp eax, 1000
+    jl .done
+    
+    mov ecx, eax
+    sub ecx, 1000       ; relative sector
+    shl ecx, 9          ; * 512
+    
+    cmp ecx, [ramdisk_size]
+    jae .done
+    
+    add ecx, [ramdisk_ptr]
+    mov edi, ecx
     mov esi, ebx
-    mov edi, sector_cache
     mov ecx, 128
     rep movsd
     
+    .done:
     popa
     ret
+
+; switch to RAM disk
+mount_ramdisk:
+    pusha
+    ; check if already allocated
+    cmp dword [ramdisk_ptr], 0
+    jne .already_alloc
+    
+    ; allocate memory
+    mov ecx, [ramdisk_size]
+    call malloc
+    test eax, eax
+    jz .fail
+    mov [ramdisk_ptr], eax
+    
+    ; clear it
+    mov edi, eax
+    mov ecx, [ramdisk_size]
+    shr ecx, 2
+    xor eax, eax
+    rep stosd
+    
+    .already_alloc:
+    mov dword [fs_mode], 1
+    mov esi, msg_ramdisk_mounted
+    call print_string
+    
+    ; try to mount (read superblock from RAM)
+    call mount_j3kfs
+    jmp .done
+    
+    .fail:
+    mov esi, msg_ramdisk_fail
+    call print_string
+    
+    .done:
+    popa
+    ret
+
+; switch to Disk
+mount_disk_mode:
+    pusha
+    mov dword [fs_mode], 0
+    mov esi, msg_disk_mounted
+    call print_string
+    call mount_j3kfs
+    popa
+    ret
+
+msg_ramdisk_mounted: db 'Switched to RAM Disk (512KB)', 10, 0
+msg_ramdisk_fail:    db 'Failed to allocate RAM Disk!', 10, 0
+msg_disk_mounted:    db 'Switched to Physical Disk', 10, 0
 
 ; ========================================
 ; MESSAGES

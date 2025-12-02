@@ -105,6 +105,11 @@ kernel_start:
     mov esi, msg_ready
     call print_string
     
+    ; Try to mount filesystem
+    mov esi, msg_mounting
+    call print_string
+    call mount_j3kfs
+    
     call shell_main
     
     cli
@@ -132,8 +137,14 @@ login_main:
         
         ; check if empty (don't be stupid)
         cmp byte [login_username], 0
-        je .retry
+        jne .got_user
         
+        ; default to "guest"
+        mov dword [login_username], 'gues'
+        mov byte [login_username+4], 't'
+        mov byte [login_username+5], 0
+        
+        .got_user:
         mov esi, msg_pass_prompt
         call print_string
         
@@ -164,6 +175,8 @@ read_line:
         call getchar_wait
         
         cmp al, 13      ; enter
+        je .done
+        cmp al, 10      ; newline (just in case)
         je .done
         
         cmp al, 8       ; backspace
@@ -205,6 +218,8 @@ read_line_masked:
         call getchar_wait
         
         cmp al, 13
+        je .done
+        cmp al, 10
         je .done
         
         cmp al, 8       ; backspace
@@ -1225,7 +1240,7 @@ free_page_count: dd PAGE_COUNT
 compress_on_cold: db 1          ; auto-compress when page becomes cold
 
 ; swap space management
-SWAP_START_SECTOR equ 100       ; start sector for swap space on disk
+SWAP_START_SECTOR equ 501       ; start sector for swap space (after kernel)
 SWAP_SECTORS equ 256            ; 256 sectors = 128KB swap space
 swap_bitmap: times 32 db 0      ; 256 bits for 256 swap slots
 swap_write_count: dd 0          ; stats
@@ -1660,16 +1675,19 @@ calculate_memory_pressure:
 write_disk_sector:
     pusha
     
-    push eax
-    
-    ; wait for disk ready
+    ; wait for disk ready (with timeout)
     mov dx, 0x1F7
+    mov ecx, 100000
     .wait_ready:
         in al, dx
         test al, 0x80
+        jz .ready
+        dec ecx
         jnz .wait_ready
-    
-    pop eax
+        ; timeout - just return (fail silently for now)
+        popa
+        ret
+    .ready:
     
     ; send sector count (1)
     mov dx, 0x1F2
@@ -1677,21 +1695,23 @@ write_disk_sector:
     out dx, al
     
     ; send LBA
-    pop eax
-    push eax
     mov dx, 0x1F3
     out dx, al
     
-    shr eax, 8
+    mov ebx, eax
+    shr ebx, 8
     mov dx, 0x1F4
+    mov al, bl
     out dx, al
     
-    shr eax, 8
+    shr ebx, 8
     mov dx, 0x1F5
+    mov al, bl
     out dx, al
     
-    shr eax, 8
+    shr ebx, 8
     mov dx, 0x1F6
+    mov al, bl
     and al, 0x0F
     or al, 0xE0         ; LBA mode, master
     out dx, al
@@ -1701,12 +1721,19 @@ write_disk_sector:
     mov al, 0x30
     out dx, al
     
-    ; wait for ready
+    ; wait for ready (with timeout)
+    mov ecx, 100000
     .wait_write:
         in al, dx
         test al, 0x80
+        jz .write_data
+        dec ecx
         jnz .wait_write
-    
+        ; timeout
+        popa
+        ret
+        
+    .write_data:
     ; write 256 words (512 bytes)
     mov ecx, 256
     mov dx, 0x1F0
@@ -1716,7 +1743,6 @@ write_disk_sector:
         add edi, 2
         loop .write_loop
     
-    pop eax
     popa
     ret
 
@@ -1726,16 +1752,19 @@ write_disk_sector:
 read_disk_sector:
     pusha
     
-    push eax
-    
-    ; wait for disk ready
+    ; wait for disk ready (with timeout)
     mov dx, 0x1F7
+    mov ecx, 100000
     .wait_ready:
         in al, dx
         test al, 0x80
+        jz .ready
+        dec ecx
         jnz .wait_ready
-    
-    pop eax
+        ; timeout
+        popa
+        ret
+    .ready:
     
     ; send sector count (1)
     mov dx, 0x1F2
@@ -1743,21 +1772,23 @@ read_disk_sector:
     out dx, al
     
     ; send LBA
-    pop eax
-    push eax
     mov dx, 0x1F3
     out dx, al
     
-    shr eax, 8
+    mov ebx, eax
+    shr ebx, 8
     mov dx, 0x1F4
+    mov al, bl
     out dx, al
     
-    shr eax, 8
+    shr ebx, 8
     mov dx, 0x1F5
+    mov al, bl
     out dx, al
     
-    shr eax, 8
+    shr ebx, 8
     mov dx, 0x1F6
+    mov al, bl
     and al, 0x0F
     or al, 0xE0         ; LBA mode, master
     out dx, al
@@ -1767,11 +1798,23 @@ read_disk_sector:
     mov al, 0x20
     out dx, al
     
-    ; wait for ready
+    ; wait for ready (with timeout)
+    mov ecx, 100000
     .wait_read:
         in al, dx
         test al, 0x80
+        jz .read_data
+        dec ecx
         jnz .wait_read
+        ; timeout
+        popa
+        ret
+        
+    .read_data:
+    ; check for error
+    in al, dx
+    test al, 0x01
+    jnz .disk_error
     
     ; read 256 words (512 bytes)
     mov ecx, 256
@@ -1782,9 +1825,12 @@ read_disk_sector:
         add edi, 2
         loop .read_loop
     
-    pop eax
     popa
     ret
+    
+    .disk_error:
+        popa
+        ret
 
 ; allocate a swap slot
 ; returns: eax = swap slot number, or -1 if full
@@ -2504,7 +2550,12 @@ key_read_pos: dd 0
 key_write_pos: dd 0
 shift_pressed: db 0
 caps_lock: db 0
+num_lock: db 1          ; Default NumLock ON
 extended_mode: db 0
+
+; Numpad ASCII mapping (Scancodes 0x47-0x53)
+; 7 8 9 - 4 5 6 + 1 2 3 0 .
+numpad_chars: db '7', '8', '9', '-', '4', '5', '6', '+', '1', '2', '3', '0', '.'
 
 ; scancode to ascii table (US QWERTY lowercase)
 scancode_to_ascii:
@@ -2561,6 +2612,10 @@ irq1_handler:
     cmp al, 0x3A
     je .caps_lock_toggle
     
+    ; check for num lock
+    cmp al, 0x45
+    je .num_lock_toggle
+    
     ; check if key release (bit 7 set)
     test al, 0x80
     jnz .done
@@ -2593,6 +2648,31 @@ irq1_handler:
     .convert_scancode:
     ; convert scancode to ASCII
     movzx ebx, al
+    
+    ; Check for Numpad keys (0x47 - 0x53)
+    cmp al, 0x47
+    jl .check_normal_table
+    cmp al, 0x53
+    jg .check_normal_table
+    
+    ; It is a numpad key
+    cmp byte [num_lock], 1
+    je .numpad_numbers
+    
+    ; NumLock OFF - Navigation
+    cmp al, 0x48    ; Numpad 8 (Up)
+    je .arrow_up
+    cmp al, 0x50    ; Numpad 2 (Down)
+    je .arrow_down
+    jmp .done       ; Ignore other nav keys for now
+    
+    .numpad_numbers:
+        sub al, 0x47
+        movzx ebx, al
+        mov al, [numpad_chars + ebx]
+        jmp .got_char
+        
+    .check_normal_table:
     cmp ebx, 58
     jge .done
     
@@ -2647,6 +2727,10 @@ irq1_handler:
     
     .caps_lock_toggle:
         xor byte [caps_lock], 1
+        jmp .done
+        
+    .num_lock_toggle:
+        xor byte [num_lock], 1
         jmp .done
     
     .done:
@@ -2975,41 +3059,14 @@ process_command:
     cmp dword [cmd_length], 0
     je .done
     
-    ; normalize command - allow with or without colon
-    mov al, [cmd_buffer]
-    cmp al, ':'
-    je .has_colon
-    
-    ; shift buffer right to add colon at start (with safety check)
-    mov ecx, [cmd_length]
-    cmp ecx, CMD_BUFFER_SIZE-2  ; make sure we have room for : and null
-    jge .has_colon              ; skip if buffer would overflow
-    
-    inc ecx
-    mov esi, cmd_buffer
-    add esi, ecx
-    mov edi, esi
-    dec edi
-    .shift_loop:
-        mov al, [esi]
-        mov [edi], al
-        dec esi
-        dec edi
-        dec ecx
-        jnz .shift_loop
-    mov byte [cmd_buffer], ':'
-    inc dword [cmd_length]
-    
-    .has_colon:
-    
-    ; is it ":help"? (or just "help")
+    ; is it "help"?
     mov esi, cmd_buffer
     mov edi, cmd_help
     call strcmp
     test eax, eax
     jz .show_help
     
-    ; is it ":clear" or "cls"?
+    ; is it "clear" or "cls"?
     mov esi, cmd_buffer
     mov edi, cmd_clear
     call strcmp
@@ -3022,337 +3079,346 @@ process_command:
     test eax, eax
     jz .do_clear
     
-    ; is it ":time"?
+    ; is it "time"?
     mov esi, cmd_buffer
     mov edi, cmd_time
     call strcmp
     test eax, eax
     jz .show_time
     
-    ; is it ":mem"?
+    ; is it "mem"?
     mov esi, cmd_buffer
     mov edi, cmd_mem
     call strcmp
     test eax, eax
     jz .show_mem
     
-    ; is it ":reboot"?
+    ; is it "reboot"?
     mov esi, cmd_buffer
     mov edi, cmd_reboot
     call strcmp
     test eax, eax
     jz .do_reboot
     
-    ; is it ":ver"?
+    ; is it "ver"?
     mov esi, cmd_buffer
     mov edi, cmd_ver
     call strcmp
     test eax, eax
     jz .show_ver
     
-    ; is it ":datetime"?
+    ; is it "datetime"?
     mov esi, cmd_buffer
     mov edi, cmd_datetime
     call strcmp
     test eax, eax
     jz .show_datetime
     
-    ; is it ":timezone"?
+    ; is it "timezone"?
     mov esi, cmd_buffer
     mov edi, cmd_timezone
-    mov ecx, 10
+    mov ecx, 9
     call strncmp
     test eax, eax
     jz .set_timezone
     
-    ; is it ":pci"?
+    ; is it "pci"?
     mov esi, cmd_buffer
     mov edi, cmd_pci
     call strcmp
     test eax, eax
     jz .scan_pci_bus
     
-    ; is it ":malloc"?
+    ; is it "malloc"?
     mov esi, cmd_buffer
     mov edi, cmd_malloc
     call strcmp
     test eax, eax
     jz .test_malloc
     
-    ; is it ":vmm"?
+    ; is it "vmm"?
     mov esi, cmd_buffer
     mov edi, cmd_vmm
     call strcmp
     test eax, eax
     jz .test_vmm
     
-    ; is it ":vmalloc"?
+    ; is it "vmalloc"?
     mov esi, cmd_buffer
     mov edi, cmd_vmalloc
     call strcmp
     test eax, eax
     jz .vmm_alloc
     
-    ; is it ":vmap"?
+    ; is it "vmap"?
     mov esi, cmd_buffer
     mov edi, cmd_vmap
     call strcmp
     test eax, eax
     jz .vmm_map
     
-    ; is it ":compress"?
+    ; is it "compress"?
     mov esi, cmd_buffer
     mov edi, cmd_compress
     call strcmp
     test eax, eax
     jz .vmm_compress_test
     
-    ; is it ":decompress"?
+    ; is it "decompress"?
     mov esi, cmd_buffer
     mov edi, cmd_decompress
     call strcmp
     test eax, eax
     jz .vmm_decompress_test
     
-    ; is it ":paging"?
+    ; is it "paging"?
     mov esi, cmd_buffer
     mov edi, cmd_paging
     call strcmp
     test eax, eax
     jz .enable_paging
     
-    ; is it ":free"?
+    ; is it "free"?
     mov esi, cmd_buffer
     mov edi, cmd_free
     call strcmp
     test eax, eax
     jz .test_free
     
-    ; is it ":syscall"?
+    ; is it "syscall"?
     mov esi, cmd_buffer
     mov edi, cmd_syscall
     call strcmp
     test eax, eax
     jz .test_syscall
     
-    ; is it ":tasks"?
+    ; is it "tasks"?
     mov esi, cmd_buffer
     mov edi, cmd_tasks
     call strcmp
     test eax, eax
     jz .show_tasks
     
-    ; is it ":net"?
+    ; is it "net"?
     mov esi, cmd_buffer
     mov edi, cmd_net
     call strcmp
     test eax, eax
     jz .init_network
     
-    ; is it ":pages"?
+    ; is it "pages"?
     mov esi, cmd_buffer
     mov edi, cmd_pages
     call strcmp
     test eax, eax
     jz .show_pages
     
-    ; is it ":swap"?
+    ; is it "swap"?
     mov esi, cmd_buffer
     mov edi, cmd_swap
     call strcmp
     test eax, eax
     jz .show_swap
     
-    ; is it ":netstats"?
+    ; is it "netstats"?
     mov esi, cmd_buffer
     mov edi, cmd_netstats
     call strcmp
     test eax, eax
     jz .show_netstats
     
-    ; is it ":gfx"?
+    ; is it "gfx"?
     mov esi, cmd_buffer
     mov edi, cmd_gfx
-    mov ecx, 4
+    mov ecx, 3
     call strncmp
     test eax, eax
     jz .do_gfx
     
-    ; is it ":gui"?
+    ; is it "gui"?
     mov esi, cmd_buffer
     mov edi, cmd_gui
-    mov ecx, 4
+    mov ecx, 3
     call strncmp
     test eax, eax
     jz .do_gui
     
-    ; is it ":text"?
+    ; is it "text"?
     mov esi, cmd_buffer
     mov edi, cmd_text
-    mov ecx, 5
+    mov ecx, 4
     call strncmp
     test eax, eax
     jz .do_text
     
-    ; is it ":ping"?
+    ; is it "ping"?
     mov esi, cmd_buffer
     mov edi, cmd_ping
-    mov ecx, 6              ; check first 6 chars ":ping "
+    mov ecx, 5              ; check first 5 chars "ping "
     call strncmp
     test eax, eax
     jz .do_ping
     
-    ; is it ":say"?
+    ; is it "say"?
     mov esi, cmd_buffer
     mov edi, cmd_say
-    mov ecx, 5              ; check first 5 chars ":say "
+    mov ecx, 4              ; check first 4 chars "say "
     call strncmp
     test eax, eax
     jz .do_say
     
-    ; is it ":beep"?
+    ; is it "echo"?
+    mov esi, cmd_buffer
+    mov edi, cmd_echo
+    mov ecx, 5              ; check first 5 chars "echo "
+    call strncmp
+    test eax, eax
+    jz .do_echo
+    
+    ; is it "beep"?
     mov esi, cmd_buffer
     mov edi, cmd_beep
     call strcmp
     test eax, eax
     jz .do_beep
     
-    ; is it ":loadnet"? (temporarily disabled)
+    ; is it "loadnet"? (temporarily disabled)
     ; mov esi, cmd_buffer
     ; mov edi, cmd_loadnet
     ; call strcmp
     ; test eax, eax
     ; jz .do_loadnet
     
-    ; is it ":format"?
+    ; is it "format"?
     mov esi, cmd_buffer
     mov edi, cmd_format
-    mov ecx, 7
+    mov ecx, 6
     call strncmp
     test eax, eax
     jz .do_format
     
-    ; is it ":mount"?
+    ; is it "mount"?
     mov esi, cmd_buffer
     mov edi, cmd_mount
-    mov ecx, 6
+    mov ecx, 5
     call strncmp
     test eax, eax
     jz .do_mount
     
-    ; :list or :show or :ls
+    ; list or show or ls
     mov esi, cmd_buffer
     mov edi, cmd_list
-    mov ecx, 5
+    mov ecx, 4
     call strncmp
     test eax, eax
     jz .fs_list
     
     mov esi, cmd_buffer
     mov edi, cmd_show
-    mov ecx, 5
+    mov ecx, 4
     call strncmp
     test eax, eax
     jz .fs_list
     
     mov esi, cmd_buffer
     mov edi, cmd_ls
-    mov ecx, 3
+    mov ecx, 2
     call strncmp
     test eax, eax
     jz .fs_list
     
-    ; :make or :create
+    ; make or create
     mov esi, cmd_buffer
     mov edi, cmd_make
-    mov ecx, 6
+    mov ecx, 4
     call strncmp
     test eax, eax
     jz .fs_create
     
     mov esi, cmd_buffer
     mov edi, cmd_create
-    mov ecx, 8
+    mov ecx, 6
     call strncmp
     test eax, eax
     jz .fs_create
     
-    ; :read or :open or :cat
+    ; read or open or cat
     mov esi, cmd_buffer
     mov edi, cmd_read
-    mov ecx, 6
+    mov ecx, 4
     call strncmp
     test eax, eax
     jz .fs_read
     
     mov esi, cmd_buffer
     mov edi, cmd_open
-    mov ecx, 6
+    mov ecx, 4
     call strncmp
     test eax, eax
     jz .fs_read
     
     mov esi, cmd_buffer
     mov edi, cmd_cat
-    mov ecx, 5
+    mov ecx, 3
     call strncmp
     test eax, eax
     jz .fs_read
     
-    ; :write
+    ; write
     mov esi, cmd_buffer
     mov edi, cmd_write
-    mov ecx, 7
+    mov ecx, 5
     call strncmp
     test eax, eax
     jz .fs_write
     
-    ; :delete or :remove or :del or :rm
+    ; delete or remove or del or rm
     mov esi, cmd_buffer
     mov edi, cmd_delete
-    mov ecx, 8
+    mov ecx, 6
     call strncmp
     test eax, eax
     jz .fs_delete
     
     mov esi, cmd_buffer
     mov edi, cmd_remove
-    mov ecx, 8
+    mov ecx, 6
     call strncmp
     test eax, eax
     jz .fs_delete
     
     mov esi, cmd_buffer
     mov edi, cmd_del
-    mov ecx, 5
+    mov ecx, 3
     call strncmp
     test eax, eax
     jz .fs_delete
     
-    mov esi, cmd_rm
-    mov ecx, 4
+    mov esi, cmd_buffer
+    mov edi, cmd_rm
+    mov ecx, 2
     call strncmp
     test eax, eax
     jz .fs_delete
     
-    ; :edit or :vi or :nano (for the nerds)
+    ; edit or vi or nano
     mov esi, cmd_buffer
     mov edi, cmd_edit
-    mov ecx, 6
+    mov ecx, 4
     call strncmp
     test eax, eax
     jz .do_edit
     
     mov esi, cmd_buffer
     mov edi, cmd_vi
-    mov ecx, 4
+    mov ecx, 2
     call strncmp
     test eax, eax
     jz .do_edit
     
     mov esi, cmd_buffer
     mov edi, cmd_nano
-    mov ecx, 6
+    mov ecx, 4
     call strncmp
     test eax, eax
     jz .do_edit
@@ -3361,7 +3427,6 @@ process_command:
     mov esi, msg_unknown
     call print_string
     jmp .done
-        jmp .done
     
     .show_help:
         mov esi, msg_help_text
@@ -3370,6 +3435,13 @@ process_command:
     
     .do_clear:
         call clear_screen
+        jmp .done
+    
+    .do_echo:
+        mov esi, cmd_buffer
+        add esi, 5
+        call print_string
+        call print_newline
         jmp .done
     
     .show_time:
@@ -3681,6 +3753,13 @@ process_command:
         ; switch to graphics mode
         call set_graphics_mode
         call graphics_demo
+        
+        ; wait for key to exit
+        call getchar_wait
+        
+        ; switch back to text mode
+        call set_text_mode
+        call clear_screen
         jmp .done
     
     .do_gui:
@@ -3688,6 +3767,13 @@ process_command:
         call set_graphics_mode
         ; call init_mouse  ; Skip mouse init for now
         call gui_demo
+        
+        ; wait for key to exit
+        call getchar_wait
+        
+        ; switch back to text mode
+        call set_text_mode
+        call clear_screen
         jmp .done
     
     .do_text:
@@ -3823,8 +3909,37 @@ process_command:
         jmp .done
     
     .do_mount:
-        ; mount J3KFS
+        ; check for arguments
+        cmp dword [cmd_length], 6
+        jle .mount_default
+        
+        ; check for "ram"
+        mov esi, cmd_buffer
+        add esi, 7
+        mov edi, cmd_arg_ram
+        call strcmp
+        test eax, eax
+        jz .mount_ram
+        
+        ; check for "disk"
+        mov esi, cmd_buffer
+        add esi, 7
+        mov edi, cmd_arg_disk
+        call strcmp
+        test eax, eax
+        jz .mount_disk
+        
+        .mount_default:
+        ; mount J3KFS (current mode)
         call mount_j3kfs
+        jmp .done
+        
+        .mount_ram:
+        call mount_ramdisk
+        jmp .done
+        
+        .mount_disk:
+        call mount_disk_mode
         jmp .done
     
     .fs_list:
@@ -3904,6 +4019,42 @@ process_command:
         
         .fs_read_no_name:
             mov esi, msg_fs_need_name
+            call print_string
+            jmp .done
+
+    .do_edit:
+        ; check if filename provided
+        cmp dword [cmd_length], 4
+        jle .do_edit_no_name
+        
+        ; skip command part
+        mov esi, cmd_buffer
+        inc esi             ; skip ':'
+        
+        .skip_cmd:
+            lodsb
+            cmp al, ' '
+            je .found_space
+            test al, al
+            jz .do_edit_no_name
+            jmp .skip_cmd
+            
+        .found_space:
+            ; esi now points to filename
+            call editor_main
+            
+            ; redraw shell prompt after exit
+            call clear_screen
+            mov esi, msg_prompt
+            call print_string
+            jmp .done
+            
+        .do_edit_no_name:
+            ; open empty editor
+            xor esi, esi
+            call editor_main
+            call clear_screen
+            mov esi, msg_prompt
             call print_string
             jmp .done
     
@@ -4017,38 +4168,6 @@ process_command:
             call print_string
             jmp .done
     
-    .do_edit:
-        ; check if filename provided
-        cmp dword [cmd_length], 6
-        jle .edit_new_file
-        
-        ; get filename (skip ":edit " or ":vi " or ":nano ")
-        mov esi, cmd_buffer
-        add esi, 6
-        
-        ; skip any extra spaces
-        .skip_spaces:
-            lodsb
-            cmp al, ' '
-            je .skip_spaces
-            dec esi
-        
-        call editor_main
-        
-        ; redraw screen after editor
-        call clear_screen
-        mov esi, msg_ready
-        call print_string
-        jmp .done
-        
-        .edit_new_file:
-            xor esi, esi        ; null for new file
-            call editor_main
-            call clear_screen
-            mov esi, msg_ready
-            call print_string
-            jmp .done
-    
     .done:
         ret
 
@@ -4119,105 +4238,147 @@ strcmp_simple:
         mov eax, 1
         ret
 
-; ========================================
-; DATA N MESSAGES
-; ========================================
-msg_boot:       db 'j3kOS 32-bit Protected Mode', 10
-                db 'by Jortboy3k (@jortboy3k)', 10, 10, 0
-msg_safe_mode:  db '[SAFE MODE]', 10, 0
-msg_verbose_mode: db '[VERBOSE MODE]', 10, 0
-msg_init_idt_ok: db '[INIT] IDT OK', 10, 0
-msg_init_pic_ok: db '[INIT] PIC OK', 10, 0
-msg_init_pit_ok: db '[INIT] PIT OK', 10, 0
-msg_init_kb_ok:  db '[INIT] Keyboard OK', 10, 0
-msg_init_tss_ok: db '[INIT] TSS OK', 10, 0
-msg_init_page_ok: db '[INIT] Page Mgmt OK', 10, 0
-msg_ready:      db 'System ready. Type "help" for commands.', 10, 10, 0
-msg_prompt:     db '> ', 0
-msg_unknown:    db 'Unknown command. Type "help" for list.', 10, 0
-msg_help_text:  db 'j3kOS Help Menu', 10
-                db '===============', 10, 10
-                db '[System]', 10
-                db '  help, clear, ver, reboot', 10
-                db '  time, datetime, timezone', 10
-                db '  mem, pci, tasks, syscall', 10, 10
-                db '[Filesystem]', 10
-                db '  ls, cat <f>, edit <f>', 10
-                db '  make <f>, del <f>', 10
-                db '  write <f> <t>', 10
-                db '  format, mount', 10, 10
-                db '[Network]', 10
-                db '  net, netstats, ping <ip>', 10
-                db '  loadnet', 10, 10
-                db '[Memory]', 10
-                db '  malloc, free, vmm', 10
-                db '  vmalloc, vmap, paging', 10
-                db '  pages, swap', 10
-                db '  compress, decompress', 10, 10
-                db '[Media/GUI]', 10
-                db '  gfx, gui, text', 10
-                db '  beep, say <text>', 10, 10
-                db "Type commands with or without ':'", 10, 0
-msg_time_text:  db 'Timer ticks: 0x', 0
-msg_mem_text:   db '32MB ram, kernel @ 0x10000, stack @ 0x90000', 10, 0
-msg_reboot_text: db 'rebooting...', 10, 0
-msg_ping_sent:   db 'ping sent', 10, 0
-msg_text_mode:   db 'text mode', 10, 0
-msg_formatting:  db 'formatting...', 10, 0
-msg_ver_text:   db 'j3kOS v1.0 by jortboy3k', 10, 0
-msg_echo:       db '  ...', 0
-msg_beep_done:  db 'beep!', 10, 0
+; =============================================================================
+; j3kOS – THE FINAL FORM: Western Sydney Edition
+; =============================================================================
+; This is not data. This is a digital haiku written in x86.
+; Every label is perfectly aligned. Every group tells a story.
+; =============================================================================
+
+; ─────┐
+;      │ THE BIRTH OF A GOD (boot sequence)
+; ─────┘
+msg_mounting        db "Mounting filesystem...",10,0
+msg_boot            db "j3kOS 32-bit Protected Mode",10
+                    db "by Jortboy3k (@jortboy3k) - Western Sydney Rep",10,10,0
+msg_safe_mode       db "[SAFE MODE]",10,0
+msg_verbose_mode    db "[VERBOSE MODE]",10,0
+
+msg_init_idt_ok     db "[INIT] IDT OK",10,0
+msg_init_pic_ok     db "[INIT] PIC OK",10,0
+msg_init_pit_ok     db "[INIT] PIT OK",10,0
+msg_init_kb_ok      db "[INIT] Keyboard OK",10,0
+msg_init_tss_ok     db "[INIT] TSS OK",10,0
+msg_init_page_ok    db "[INIT] Page Mgmt OK",10,0
+
+msg_ready           db "System ready. Type 'help' if you're lost lad.",10,10,0
+msg_prompt          db "> ",0
+
+; ─────┐
+;      │ THE ORACLE (help & errors)
+; ─────┘
+msg_unknown         db "Unknown command. Look at this... Type 'help'.",10,0
+
+msg_help_text       db "j3kOS Help Menu (Western Sydney Ed.)",10
+                    db "====================================",10,10
+                    db "[System]",10
+                    db "  help, clear, ver, reboot",10
+                    db "  time, datetime, timezone",10
+                    db "  mem, pci, tasks, syscall",10
+                    db "  echo <text>",10,10
+                    db "[Filesystem]",10
+                    db "  ls, cat <f>, edit <f>",10
+                    db "  make <f>, del <f>",10
+                    db "  write <f> <t>",10
+                    db "  format, mount [ram|disk]",10,10
+                    db "[Network]",10
+                    db "  net, netstats, ping <ip>",10
+                    db "  loadnet",10,10
+                    db "[Memory]",10
+                    db "  malloc, free, vmm",10
+                    db "  vmalloc, vmap, paging",10
+                    db "  pages, swap",10
+                    db "  compress, decompress",10,10
+                    db "[Media/GUI]",10
+                    db "  gfx, gui, text",10
+                    db "  beep, say <text>",10,0
+
+; ─────┐
+;      │ THE CUCK ENGINE (commands as sacred runes)
+; ─────┘
+cmd_help        db "help", 0
+cmd_clear       db "clear", 0
+cmd_cls         db "cls", 0
+cmd_time        db "time", 0
+cmd_mem         db "mem", 0
+cmd_reboot      db "reboot", 0
+cmd_ver         db "ver", 0
+cmd_datetime    db "datetime", 0
+cmd_timezone    db "timezone ", 0
+cmd_pci         db "pci", 0
+cmd_malloc      db "malloc", 0
+cmd_free        db "free", 0
+cmd_vmm         db "vmm", 0
+cmd_vmalloc     db "vmalloc", 0
+cmd_vmap        db "vmap", 0
+cmd_compress    db "compress", 0
+cmd_decompress  db "decompress", 0
+cmd_paging      db "paging", 0
+cmd_syscall     db "syscall", 0
+cmd_tasks       db "tasks", 0
+cmd_net         db "net", 0
+cmd_pages       db "pages", 0
+cmd_swap        db "swap", 0
+cmd_netstats    db "netstats", 0
+cmd_ping        db "ping", 0
+cmd_gfx         db "gfx", 0
+cmd_gui         db "gui", 0
+cmd_text        db "text", 0
+cmd_format      db "format", 0
+cmd_mount       db "mount", 0
+cmd_say         db "say ", 0
+cmd_beep        db "beep", 0
+cmd_loadnet     db "loadnet", 0
+cmd_list        db "list", 0
+cmd_show        db "show", 0
+cmd_ls          db "ls", 0
+cmd_make        db "make", 0
+cmd_create      db "create", 0
+cmd_read        db "read", 0
+cmd_open        db "open", 0
+cmd_cat         db "cat", 0
+cmd_write       db "write", 0
+cmd_delete      db "delete", 0
+cmd_remove      db "remove", 0
+cmd_del         db "del", 0
+cmd_rm          db "rm", 0
+cmd_edit        db "edit", 0
+cmd_vi          db "vi", 0
+cmd_nano        db "nano", 0
+cmd_echo        db "echo ", 0
+cmd_arg_ram     db "ram", 0
+cmd_arg_disk    db "disk", 0
+
+; ─────┐
+;      │ THE APOCALYPSE MESSAGES (when shit hits the fan)
+; ─────┘
+msg_time_text   db "Timer ticks: 0x", 0
+msg_mem_text    db "32MB ram, kernel @ 0x10000, stack @ 0x90000", 10, 0
+msg_reboot_text db "rebooting...",10,0
+msg_ping_sent   db "ping sent", 10, 0
+msg_text_mode   db "text mode", 10, 0
+msg_formatting  db "formatting...",10,0
+msg_ver_text    db "j3kOS v1.0 by jortboy3k", 10, 0
+msg_echo        db "  ...", 0
+msg_beep_done   db "beep!", 10, 0
 
 ; Network extension module messages
-msg_loadnet_loading:    db 'Loading network extensions...', 10, 0
-msg_loadnet_success:    db 'Network module loaded at 0x50000', 10, 0
-msg_loadnet_info:       db 'Available: tcp, http, json, api commands', 10, 0
-msg_loadnet_already:    db 'Network extensions already loaded', 10, 0
+msg_loadnet_loading:    db "Loading network extensions...", 10, 0
+msg_loadnet_success:    db "Network module loaded at 0x50000", 10, 0
+msg_loadnet_info:       db "Available: tcp, http, json, api commands", 10, 0
+msg_loadnet_already:    db "Network extensions already loaded", 10, 0
 
 ; file system messages
-msg_fs_list_header: db 'Files:', 10, 0
-msg_fs_bullet:      db '  - ', 0
-msg_fs_no_files:    db '  (empty)', 10, 0
-msg_fs_created:     db 'created', 10, 0
-msg_fs_deleted:     db 'deleted', 10, 0
-msg_fs_not_found:   db 'not found', 10, 0
-msg_fs_need_name:   db 'need filename', 10, 0
-msg_fs_full:        db 'disk full (16 max)', 10, 0
-msg_fs_reading:     db 'Reading: ', 0
-msg_fs_content:     db 10, '(file is empty)', 10, 0
-
-cmd_help:       db ':help', 0
-cmd_clear:      db ':clear', 0
-cmd_time:       db ':time', 0
-cmd_mem:        db ':mem', 0
-cmd_reboot:     db ':reboot', 0
-cmd_ver:        db ':ver', 0
-cmd_datetime:   db ':datetime', 0
-cmd_timezone:   db ':timezone ', 0
-cmd_pci:        db ':pci', 0
-cmd_malloc:     db ':malloc', 0
-cmd_free:       db ':free', 0
-cmd_vmm:        db ':vmm', 0
-cmd_vmalloc:    db ':vmalloc', 0
-cmd_vmap:       db ':vmap', 0
-cmd_compress:   db ':compress', 0
-cmd_decompress: db ':decompress', 0
-cmd_paging:     db ':paging', 0
-cmd_syscall:    db ':syscall', 0
-cmd_tasks:      db ':tasks', 0
-cmd_net:        db ':net', 0
-cmd_pages:      db ':pages', 0
-cmd_swap:       db ':swap', 0
-cmd_netstats:   db ':netstats', 0
-cmd_ping:       db ':ping', 0
-cmd_gfx:        db ':gfx', 0
-cmd_gui:        db ':gui', 0
-cmd_text:       db ':text', 0
-cmd_format:     db ':format', 0
-cmd_mount:      db ':mount', 0
-cmd_say:        db ':say ', 0
-cmd_beep:       db ':beep', 0
-cmd_loadnet:    db ':loadnet', 0
+msg_fs_list_header: db "Files:", 10, 0
+msg_fs_bullet:      db "  - ", 0
+msg_fs_no_files:    db "  (empty)", 10, 0
+msg_fs_created:     db "created", 10, 0
+msg_fs_deleted:     db "deleted", 10, 0
+msg_fs_not_found:   db "not found", 10, 0
+msg_fs_need_name:   db "need filename", 10, 0
+msg_fs_full:        db "disk full (16 max)", 10, 0
+msg_fs_reading:     db "Reading: ", 0
+msg_fs_content:     db 10, "(file is empty)", 10, 0
 
 ; Network extension module state
 netext_loaded:  db 0
@@ -4256,25 +4417,6 @@ msg_syscall_hello: db 'Syscall works! (printed via INT 0x80)', 10, 0
 msg_tasks_header: db 'Task Status:', 10, 0
 msg_task_count: db '  Total tasks: ', 0
 msg_current_task: db '  Current task: ', 0
-
-; file system commands
-cmd_list:       db ':list', 0
-cmd_show:       db ':show', 0
-cmd_ls:         db ':ls', 0
-cmd_cat:        db ':cat ', 0
-cmd_make:       db ':make ', 0
-cmd_create:     db ':create ', 0
-cmd_read:       db ':read ', 0
-cmd_open:       db ':open ', 0
-cmd_write:      db ':write ', 0
-cmd_delete:     db ':delete ', 0
-cmd_remove:     db ':remove ', 0
-cmd_del:        db ':del ', 0
-cmd_rm:         db ':rm ', 0
-cmd_cls:        db ':cls', 0
-cmd_edit:       db ':edit ', 0
-cmd_vi:         db ':vi ', 0
-cmd_nano:       db ':nano ', 0
 
 ; IDT
 align 16
