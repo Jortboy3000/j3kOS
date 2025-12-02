@@ -132,3 +132,120 @@ play_startup_sound:
 
 msg_playing_tone: db 'playing tone...', 10, 0
 msg_melody_done: db 'beep!', 10, 0
+
+; ========================================
+; MUSIC PLAYER
+; ========================================
+
+; play a melody
+; ESI = pointer to melody data
+; Format: dw frequency, dw duration (ms)
+;         dw 0, 0 to end
+play_melody:
+    pusha
+    
+    .loop:
+        ; load frequency
+        movzx eax, word [esi]
+        test eax, eax
+        jz .check_end
+        
+        ; load duration
+        movzx ebx, word [esi + 2]
+        
+        ; play it
+        call play_tone
+        
+        ; small gap between notes
+        push ebx
+        mov ebx, 10
+        call .wait_ms
+        pop ebx
+        
+        add esi, 4
+        jmp .loop
+        
+    .check_end:
+        ; check if duration is also 0 (end of song)
+        cmp word [esi + 2], 0
+        je .done
+        
+        ; if freq is 0 but duration > 0, it's a rest
+        movzx ebx, word [esi + 2]
+        call .wait_ms
+        add esi, 4
+        jmp .loop
+        
+    .done:
+    popa
+    ret
+    
+    .wait_ms:
+        push ecx
+        mov ecx, ebx
+        .wait_loop:
+            push ecx
+            mov ecx, 1000
+            .inner:
+                nop
+                loop .inner
+            pop ecx
+            loop .wait_loop
+        pop ecx
+        ret
+
+; "The Message" - ONEFOUR (Drill Style Loop)
+melody_onefour:
+    ; Bar 1
+    dw 523, 150 ; C5
+    dw 494, 150 ; B4
+    dw 523, 150 ; C5
+    dw 392, 400 ; G4
+    dw 0, 100   ; Rest
+    
+    ; Bar 2
+    dw 523, 150 ; C5
+    dw 494, 150 ; B4
+    dw 523, 150 ; C5
+    dw 622, 400 ; Eb5
+    dw 0, 100   ; Rest
+
+    ; Bar 3
+    dw 523, 150 ; C5
+    dw 494, 150 ; B4
+    dw 523, 150 ; C5
+    dw 392, 300 ; G4
+    dw 349, 150 ; F4
+    
+    ; Bar 4
+    dw 311, 600 ; Eb4
+    
+    dw 0, 0     ; end
+
+; "Drill Style Loop" (Inspired by ONEFOUR)
+melody_drill:
+    ; Bar 1
+    dw 523, 200 ; C5
+    dw 494, 200 ; B4
+    dw 523, 200 ; C5
+    dw 392, 600 ; G4
+    dw 0, 200   ; Rest
+    
+    ; Bar 2
+    dw 523, 200 ; C5
+    dw 494, 200 ; B4
+    dw 523, 200 ; C5
+    dw 622, 600 ; Eb5
+    dw 0, 200   ; Rest
+
+    ; Bar 3
+    dw 523, 200 ; C5
+    dw 494, 200 ; B4
+    dw 523, 200 ; C5
+    dw 392, 400 ; G4
+    dw 349, 200 ; F4
+    
+    ; Bar 4
+    dw 311, 800 ; Eb4
+    
+    dw 0, 0     ; end

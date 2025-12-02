@@ -2033,6 +2033,7 @@ swap_page_in:
 %include "gui.asm"            ; Basic GUI widgets
 %include "j3kfs.asm"          ; file system (stores your garbage)
 %include "sound.asm"          ; annoying beep noises
+%include "snake.asm"          ; western sydney snake
 %include "vmm.asm"            ; virtual memory magic (don't touch it)
 %include "editor.asm"         ; the goddamn text editor
 
@@ -2636,6 +2637,10 @@ irq1_handler:
         je .arrow_up
         cmp al, 0x50        ; down arrow
         je .arrow_down
+        cmp al, 0x4B        ; left arrow
+        je .arrow_left
+        cmp al, 0x4D        ; right arrow
+        je .arrow_right
         jmp .done
         
         .arrow_up:
@@ -2643,6 +2648,12 @@ irq1_handler:
             jmp .got_char
         .arrow_down:
             mov al, 4       ; special code for down
+            jmp .got_char
+        .arrow_left:
+            mov al, 2       ; special code for left
+            jmp .got_char
+        .arrow_right:
+            mov al, 3       ; special code for right
             jmp .got_char
     
     .convert_scancode:
@@ -3282,6 +3293,20 @@ process_command:
     test eax, eax
     jz .do_beep
     
+    ; is it "music"?
+    mov esi, cmd_buffer
+    mov edi, cmd_music
+    call strcmp
+    test eax, eax
+    jz .do_music
+
+    ; is it "snake"?
+    mov esi, cmd_buffer
+    mov edi, cmd_snake
+    call strcmp
+    test eax, eax
+    jz .do_snake
+    
     ; is it "loadnet"? (temporarily disabled)
     ; mov esi, cmd_buffer
     ; mov edi, cmd_loadnet
@@ -3765,11 +3790,7 @@ process_command:
     .do_gui:
         ; GUI demo - simple window display
         call set_graphics_mode
-        ; call init_mouse  ; Skip mouse init for now
         call gui_demo
-        
-        ; wait for key to exit
-        call getchar_wait
         
         ; switch back to text mode
         call set_text_mode
@@ -3899,6 +3920,17 @@ process_command:
         ; call print_string
         ; jmp .done
     
+    .do_music:
+        mov esi, msg_playing_music
+        call print_string
+        mov esi, melody_onefour
+        call play_melody
+        jmp .done
+
+    .do_snake:
+        call snake_game
+        jmp .done
+
     .do_format:
         ; format disk with J3KFS
         mov esi, msg_formatting
@@ -4291,7 +4323,8 @@ msg_help_text       db "j3kOS Help Menu (Western Sydney Ed.)",10
                     db "  compress, decompress",10,10
                     db "[Media/GUI]",10
                     db "  gfx, gui, text",10
-                    db "  beep, say <text>",10,0
+                    db "  beep, say <text>",10
+                    db "  music, snake",10,0
 
 ; ─────┐
 ;      │ THE CUCK ENGINE (commands as sacred runes)
@@ -4328,6 +4361,8 @@ cmd_format      db "format", 0
 cmd_mount       db "mount", 0
 cmd_say         db "say ", 0
 cmd_beep        db "beep", 0
+cmd_music       db "music", 0
+cmd_snake       db "snake", 0
 cmd_loadnet     db "loadnet", 0
 cmd_list        db "list", 0
 cmd_show        db "show", 0
@@ -4361,6 +4396,7 @@ msg_formatting  db "formatting...",10,0
 msg_ver_text    db "j3kOS v1.0 by jortboy3k", 10, 0
 msg_echo        db "  ...", 0
 msg_beep_done   db "beep!", 10, 0
+msg_playing_music db "Playing The Message - ONEFOUR...", 10, 0
 
 ; Network extension module messages
 msg_loadnet_loading:    db "Loading network extensions...", 10, 0

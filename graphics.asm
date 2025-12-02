@@ -359,9 +359,11 @@ set_text_mode:
     mov al, 0x0C        ; Map at A0000, Graphics mode
     out dx, al
     
-    ; 3. Upload Font (8x8)
-    ; We need to write 256 chars * 32 bytes (VGA allocates 32 bytes per char even if 8x8)
-    ; Our font is packed 8 bytes per char. We need to pad with zeros.
+    ; 3. Upload Font (Software 8x16 Expansion)
+    ; We expand our 8x8 font to 8x16 by doubling each row.
+    ; This allows us to use standard VGA 400-line mode (Max Scan = 15)
+    ; which is more compatible and looks more "standard" than Double Scan.
+    
     mov edi, 0xA0000
     
     ; Clear font area first (first 8KB)
@@ -381,12 +383,16 @@ set_text_mode:
     .font_loop:
         push ecx
         
-        ; Copy 8 bytes of font data
+        ; Expand 8 bytes to 16 bytes (double each row)
         mov ecx, 8
-        rep movsb
+        .expand_loop:
+            lodsb           ; Load 8x8 row
+            stosb           ; Store row N
+            stosb           ; Store row N+1 (duplicate)
+            loop .expand_loop
         
-        ; Pad remaining 24 bytes with zero
-        mov ecx, 24
+        ; Pad remaining 16 bytes with zero (32 bytes total per char)
+        mov ecx, 16
         xor al, al
         rep stosb
         
@@ -435,6 +441,9 @@ set_text_mode:
     ; text mode baby
     mov byte [video_mode], 0
     
+    ; Clear screen to ensure clean state
+    call clear_screen
+    
     popa
     ret
     
@@ -443,9 +452,9 @@ set_text_mode:
         db 0x01, 0x03, 0x00, 0x02
         
     .crtc_regs_03h:
-        ; Modified for 8x8 font (Index 9 = 0x47 -> 7 scanlines)
+        ; Standard VGA Text Mode (400 lines, 16 scanlines/char)
         db 0x5F, 0x4F, 0x50, 0x82, 0x55, 0x81, 0xBF, 0x1F
-        db 0x00, 0x47, 0x0D, 0x0E, 0x00, 0x00, 0x00, 0x00
+        db 0x00, 0x0F, 0x0E, 0x0F, 0x00, 0x00, 0x00, 0x00
         db 0x9C, 0x8E, 0x8F, 0x28, 0x1F, 0x96, 0xB9, 0xA3
         db 0xFF
         
@@ -456,7 +465,7 @@ set_text_mode:
     .ac_regs_03h:
         db 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x14, 0x07
         db 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F
-        db 0x0C, 0x00, 0x0F, 0x08
+        db 0x0C, 0x00, 0x0F, 0x00
 
 ; ========================================
 ; PALETTE MANAGEMENT

@@ -622,11 +622,15 @@ update_buttons:
 gui_demo:
     pusha
     
-    ; clear screen
-    mov al, COLOR_DARK_GRAY
-    call clear_graphics_screen
+    ; initialize mouse
+    call init_mouse
     
-    ; draw a simple window frame
+    ; reset GUI state
+    mov byte [gui_exit_flag], 0
+    mov dword [gui_window_count], 0
+    mov dword [gui_button_count], 0
+    
+    ; create main window
     mov eax, 40
     mov ebx, 30
     mov ecx, 240
@@ -634,49 +638,104 @@ gui_demo:
     mov esi, gui_demo_title
     call create_window
     
-    ; draw the window once
-    xor eax, eax
-    call draw_window
+    ; create buttons
+    ; Button 1
+    mov eax, 60
+    mov ebx, 60
+    mov ecx, 80
+    mov edx, 20
+    mov esi, gui_button1_label
+    mov edi, gui_button1_callback
+    call create_button
     
-    ; draw some text
-    mov esi, gui_status_msg
-    mov eax, 50
-    mov ebx, 80
-    mov dl, 15              ; white
-    call draw_string_gfx
+    ; Button 2
+    mov eax, 160
+    mov ebx, 60
+    mov ecx, 80
+    mov edx, 20
+    mov esi, gui_button2_label
+    mov edi, gui_button2_callback
+    call create_button
     
-    mov esi, .msg_esc
-    mov eax, 50
+    ; Exit Button
+    mov eax, 110
     mov ebx, 100
-    mov dl, 14              ; yellow
-    call draw_string_gfx
+    mov ecx, 100
+    mov edx, 20
+    mov esi, gui_button3_label
+    mov edi, gui_button3_callback
+    call create_button
     
-    ; simple loop - just wait for ESC
+    ; MAIN GUI LOOP
     .loop:
-        ; check for ESC key
-        in al, 0x64         ; check keyboard status
-        test al, 1          ; data available?
-        jz .no_key
-        
-        in al, 0x60         ; read scancode
-        cmp al, 0x01        ; ESC key?
+        ; check exit flag
+        cmp byte [gui_exit_flag], 1
         je .exit
+
+        ; 1. Clear screen (or redraw background)
+        ; For less flicker, we should only redraw what changed, but for now
+        ; we'll just clear to a solid color to be safe.
+        mov al, 3           ; Cyan background
+        call clear_graphics_screen
         
+        ; 2. Update Mouse
+        call mouse_update
+        
+        ; 3. Update Logic (Buttons)
+        call update_buttons
+        
+        ; 4. Draw Windows
+        ; (We only have one for now)
+        mov eax, 0
+        call draw_window
+        
+        ; 5. Draw Buttons
+        mov ecx, [gui_button_count]
+        xor eax, eax
+        .draw_btns:
+            cmp eax, ecx
+            jge .btns_done
+            push eax
+            push ecx
+            call draw_button
+            pop ecx
+            pop eax
+            inc eax
+            jmp .draw_btns
+        .btns_done:
+        
+        ; 6. Draw Status Text
+        mov esi, gui_status_msg
+        mov eax, 50
+        mov ebx, 150
+        mov dl, 15              ; white
+        call draw_string_gfx
+        
+        ; 7. Draw Mouse Cursor (Last!)
+        call draw_mouse_cursor
+        
+        ; 8. Check for Exit Key (ESC)
+        in al, 0x64
+        test al, 1
+        jz .no_key
+        in al, 0x60
+        cmp al, 0x01        ; ESC
+        je .exit
         .no_key:
         
-        ; small delay
-        mov ecx, 50000
-        .delay:
-            nop
-            loop .delay
-        
+        ; 9. VSync / Delay
+        ; Wait for retrace to reduce flicker
+        mov dx, 0x3DA
+        .wait_retrace:
+            in al, dx
+            test al, 8
+            jz .wait_retrace
+            
         jmp .loop
     
     .exit:
     popa
     ret
-    
-    .msg_esc: db 'Press ESC to exit', 0
 
 ; button callbacks
 gui_button1_callback:
@@ -702,13 +761,11 @@ gui_button2_callback:
 
 gui_button3_callback:
     pusha
-    ; exit to text mode
-    call set_text_mode
+    mov byte [gui_exit_flag], 1
     popa
-    ; don't return to loop
-    add esp, 4      ; skip our return address
-    popa            ; restore from gui_demo
     ret
+
+gui_exit_flag: db 0
 
 gui_demo_title:         db 'j3kOS Window', 0
 gui_button1_label:      db 'Button 1', 0
