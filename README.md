@@ -13,8 +13,9 @@ It's a monolithic kernel that boots from a floppy disk (because retro), switches
 ### The Specs (Yes, it actually works)
 
 *   **Bootloader**: Custom 2-stage loader. I didn't use GRUB because I'm not lazy. It loads the kernel, enables the A20 line, and sets up the GDT.
-*   **Kernel**: Runs in 32-bit Protected Mode. Flat memory model. No segmentation nonsense.
+*   **Kernel**: Runs in 32-bit Protected Mode. Paging enabled (Virtual Memory). Flat memory model. No segmentation nonsense.
 *   **Interrupts**: Full IDT setup. I remapped the PIC because IBM made questionable decisions in the 80s.
+*   **Memory Management**: Full Paging support with a Virtual Memory Manager (VMM). We have a physical frame allocator and a heap.
 *   **Graphics**: Custom VGA drivers. 
     *   **Text Mode**: 80x25 with hardware cursor handling.
     *   **Graphics Mode**: 320x200 (Mode 13h) with a custom font renderer because BIOS interrupts don't work in protected mode.

@@ -97,8 +97,8 @@ vmm_init:
     ; Step 3: Identity map kernel (0-16MB)
     call vmm_identity_map_kernel
     
-    ; Step 4: Enable paging (DISABLED - causes boot hang, enable manually with :paging)
-    ; call vmm_enable_paging
+    ; Step 4: Enable paging
+    call vmm_enable_paging
     
     ; Step 5: Install page fault handler
     call vmm_install_page_fault_handler
@@ -121,8 +121,11 @@ vmm_init_frame_allocator:
     xor eax, eax
     rep stosd
     
-    ; Mark first 1MB as used (BIOS, kernel, etc.)
-    mov ecx, 256                    ; 256 pages = 1MB
+    ; Mark first 3MB as used
+    ; 0-1MB: BIOS, Kernel, Stack
+    ; 1MB-2MB: Kernel Heap (malloc)
+    ; 2MB-3MB: Page Directory & Page Tables
+    mov ecx, 768                    ; 768 pages = 3MB
     mov edi, page_frame_bitmap
     
     .mark_used:
@@ -132,7 +135,7 @@ vmm_init_frame_allocator:
         bts dword [edi + ebx], ecx  ; set bit
         loop .mark_used
     
-    mov dword [next_free_frame], 256    ; start allocating from 1MB
+    mov dword [next_free_frame], 768    ; start allocating from 3MB
     
     popa
     ret
@@ -163,8 +166,8 @@ vmm_alloc_frame:
         ; Wrap around if needed
         cmp ebx, PHYS_PAGE_COUNT
         jl .continue
-        mov dword [next_free_frame], 256
-        mov ebx, 256
+        mov dword [next_free_frame], 768
+        mov ebx, 768
         
         .continue:
             loop .search_loop
