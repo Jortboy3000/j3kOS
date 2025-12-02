@@ -6,6 +6,15 @@
 [ORG 0x10000]
 
 ; ========================================
+; KERNEL HEADER - For dynamic loading
+; ========================================
+kernel_header:
+    dd 0x4A334B4F           ; Magic: "J3KO" (j3kOS signature)
+    dd 0x00000000           ; Kernel size in bytes (will be set by build script)
+    dd 0x00000001           ; Version: 1.0
+    dd 0x00000000           ; Reserved for future use
+
+; ========================================
 ; KERNEL ENTRY - LET'S FUCKING GO
 ; ========================================
 kernel_start:
@@ -32,11 +41,48 @@ kernel_start:
 .skip_mode_msg:
     
     call init_idt
+    cmp byte [boot_mode], 2
+    jne .skip_idt_msg
+    mov esi, msg_init_idt_ok
+    call print_string
+.skip_idt_msg:
+    
     call init_pic
+    cmp byte [boot_mode], 2
+    jne .skip_pic_msg
+    mov esi, msg_init_pic_ok
+    call print_string
+.skip_pic_msg:
+    
     call init_pit
+    cmp byte [boot_mode], 2
+    jne .skip_pit_msg
+    mov esi, msg_init_pit_ok
+    call print_string
+.skip_pit_msg:
+    
     call init_keyboard
+    cmp byte [boot_mode], 2
+    jne .skip_kb_msg
+    mov esi, msg_init_kb_ok
+    call print_string
+.skip_kb_msg:
+    
     call init_tss
+    cmp byte [boot_mode], 2
+    jne .skip_tss_msg
+    mov esi, msg_init_tss_ok
+    call print_string
+.skip_tss_msg:
+    
     call init_page_mgmt
+    cmp byte [boot_mode], 2
+    jne .skip_page_msg
+    mov esi, msg_init_page_ok
+    call print_string
+.skip_page_msg:
+    
+    call vmm_init               ; Initialize virtual memory manager
     
     sti
     
@@ -46,6 +92,13 @@ kernel_start:
     call play_startup_sound
 .skip_sound:
     
+    call clear_screen
+    
+    mov esi, msg_boot
+    call print_string
+    
+    call login_main
+    
     mov esi, msg_ready
     call print_string
     
@@ -53,6 +106,131 @@ kernel_start:
     
     cli
     hlt
+
+; ========================================
+; LOGIN - SECURITY THEATER
+; ========================================
+login_username: times 32 db 0
+login_password: times 32 db 0
+msg_login_prompt: db 'j3kOS Login: ', 0
+msg_pass_prompt:  db 'Password: ', 0
+msg_login_fail:   db 'Login incorrect.', 10, 0
+msg_welcome_user: db 'Welcome, ', 0
+
+login_main:
+    .retry:
+        mov esi, msg_login_prompt
+        call print_string
+        
+        ; read username
+        mov ebx, login_username
+        mov ecx, 32
+        call read_line
+        
+        ; check if empty
+        cmp byte [login_username], 0
+        je .retry
+        
+        mov esi, msg_pass_prompt
+        call print_string
+        
+        ; read password (masked)
+        mov ebx, login_password
+        mov ecx, 32
+        call read_line_masked
+        
+        ; for now, accept anything
+        
+        call print_newline
+        mov esi, msg_welcome_user
+        call print_string
+        mov esi, login_username
+        call print_string
+        call print_newline
+        call print_newline
+        
+        ret
+
+; Helper to read a line of text
+read_line:
+    ; EBX = buffer, ECX = max len
+    pusha
+    xor edx, edx    ; count
+    
+    .loop:
+        call getchar_wait
+        
+        cmp al, 13      ; enter
+        je .done
+        
+        cmp al, 8       ; backspace
+        je .backspace
+        
+        cmp edx, ecx
+        jge .loop
+        
+        mov [ebx + edx], al
+        inc edx
+        call print_char
+        jmp .loop
+        
+    .backspace:
+        test edx, edx
+        jz .loop
+        dec edx
+        dec dword [cursor_x]
+        mov al, ' '
+        call print_char
+        dec dword [cursor_x]
+        jmp .loop
+        
+    .done:
+        mov byte [ebx + edx], 0
+        mov al, 10
+        call print_char
+        popa
+        ret
+
+; Helper to read a line masked (*)
+read_line_masked:
+    ; EBX = buffer, ECX = max len
+    pusha
+    xor edx, edx
+    
+    .loop:
+        call getchar_wait
+        
+        cmp al, 13
+        je .done
+        
+        cmp al, 8       ; backspace
+        je .backspace
+        
+        cmp edx, ecx
+        jge .loop
+        
+        mov [ebx + edx], al
+        inc edx
+        mov al, '*'
+        call print_char
+        jmp .loop
+        
+    .backspace:
+        test edx, edx
+        jz .loop
+        dec edx
+        dec dword [cursor_x]
+        mov al, ' '
+        call print_char
+        dec dword [cursor_x]
+        jmp .loop
+        
+    .done:
+        mov byte [ebx + edx], 0
+        mov al, 10
+        call print_char
+        popa
+        ret
 
 ; ========================================
 ; VIDEO OUTPUT - PRINT SHIT TO SCREEN
@@ -919,10 +1097,24 @@ msg_rtl_mac:        db 'MAC Address: ', 0
 msg_rtl_ready:      db 'Network card ready!', 10, 0
 
 ; ========================================
-; MEMORY ALLOCATOR - MALLOC/FREE N SHIT
+; MEMORY ALLOCATOR - MALLOC/FREE
 ; ========================================
+; Memory Layout (after kernel loads):
+;   0x00000000 - 0x000003FF : Real mode IVT (1KB)
+;   0x00000400 - 0x000004FF : BIOS Data Area (256 bytes)
+;   0x00000500 - 0x00007BFF : Free conventional memory (~29KB)
+;   0x00007C00 - 0x00007DFF : Boot sector (512 bytes)
+;   0x00007E00 - 0x00007FFF : Boot scratch space (512 bytes)
+;   0x00008000 - 0x0000FFFF : Free (~32KB)
+;   0x00010000 - 0x0001FFFF : Kernel code/data (~64KB actual, 120 sectors max)
+;   0x00020000 - 0x0008FFFF : Free (~448KB)
+;   0x00090000 - 0x0009FFFF : Stack (grows down, 64KB)
+;   0x000A0000 - 0x000BFFFF : VGA video memory (128KB)
+;   0x000C0000 - 0x000FFFFF : BIOS ROM area (256KB)
+;   0x00100000 - 0x001FFFFF : Heap (1MB) ← malloc/free uses this
+;   0x00200000+             : Extended memory (for future expansion)
 
-; heap starts at 1MB (after kernel)
+; heap starts at 1MB (after kernel and stack)
 HEAP_START equ 0x100000
 HEAP_SIZE equ 0x100000      ; 1MB heap
 
@@ -1006,17 +1198,31 @@ malloc:
     push esi
     push edi
     
+    ; validate input
+    test ecx, ecx
+    jz .invalid_size
+    
+    ; check for overflow (max allocation 256KB)
+    cmp ecx, 0x40000
+    ja .invalid_size
+    
     ; make sure heap is initialized
     call init_heap
     
-    ; align size to 4 bytes
-    add ecx, 3
-    and ecx, 0xFFFFFFFC
+    ; align size to 16 bytes for better cache performance
+    add ecx, 15
+    and ecx, 0xFFFFFFF0
     
-    ; find a free block that fits
-    mov esi, [heap_first_block]
+    ; find a free block that fits (first-fit algorithm)
+    mov esi, HEAP_START
     
     .find_loop:
+        ; bounds check - make sure we're still in heap
+        mov eax, esi
+        sub eax, HEAP_START
+        cmp eax, HEAP_SIZE
+        jae .not_found
+        
         ; check if this is a valid block
         cmp dword [esi + 12], HEAP_MAGIC
         jne .not_found
@@ -1033,6 +1239,9 @@ malloc:
         ; found a good block! allocate it
         mov dword [esi + 4], 0  ; mark as allocated
         
+        ; TODO: split block if it's much larger than needed
+        ; (optimization for later)
+        
         ; return pointer (skip header)
         lea eax, [esi + BLOCK_HEADER_SIZE]
         jmp .done
@@ -1043,6 +1252,7 @@ malloc:
             jnz .find_loop
     
     .not_found:
+    .invalid_size:
         xor eax, eax        ; return NULL
     
     .done:
@@ -1057,6 +1267,18 @@ malloc:
 free:
     push ebx
     push esi
+    push edi
+    
+    ; validate pointer is not NULL
+    test eax, eax
+    jz .invalid
+    
+    ; validate pointer is within heap bounds
+    cmp eax, HEAP_START + BLOCK_HEADER_SIZE
+    jb .invalid
+    mov ebx, HEAP_START + HEAP_SIZE
+    cmp eax, ebx
+    jae .invalid
     
     ; get block header (pointer - 16)
     sub eax, BLOCK_HEADER_SIZE
@@ -1066,10 +1288,18 @@ free:
     cmp dword [esi + 12], HEAP_MAGIC
     jne .invalid
     
+    ; check if already free (double-free protection)
+    cmp dword [esi + 4], 1
+    je .invalid
+    
     ; mark as free
     mov dword [esi + 4], 1
     
+    ; TODO: coalesce adjacent free blocks
+    ; (optimization for later to reduce fragmentation)
+    
     .invalid:
+        pop edi
         pop esi
         pop ebx
         ret
@@ -1077,6 +1307,9 @@ free:
 ; ========================================
 ; PAGE MANAGEMENT - HOT/COLD MEMORY
 ; ========================================
+; Advanced memory management with page tracking, compression, and swapping
+; Pages can be: FREE, ALLOCATED, HOT (frequently accessed), COLD (rarely used),
+; COMPRESSED (RLE compressed in memory), or SWAPPED (saved to disk)
 
 ; initialize page management system
 init_page_mgmt:
@@ -1682,17 +1915,24 @@ swap_page_in:
         popa
         ret
 
-%include "swap_system.asm"
-%include "network.asm"
-%include "graphics.asm"
-%include "gui.asm"
-%include "j3kfs.asm"
-%include "sound.asm"
-; %include "tcp.asm"          ; Disabled - too large (630 lines)
-; %include "http.asm"         ; Disabled - too large (640 lines)
-; %include "json.asm"         ; Disabled - too large (850 lines)
-; %include "rest_api.asm"     ; Disabled - too large (630 lines)
-; %include "editor.asm"       ; Disabled - too large (2100+ lines)
+; ========================================
+; MODULAR INCLUDES - EXTERNAL SUBSYSTEMS
+; ========================================
+%include "swap_system.asm"    ; Swap/compression for memory management
+%include "network.asm"        ; Basic network stack (ARP, ICMP)
+%include "graphics.asm"       ; VGA graphics modes
+%include "gui.asm"            ; Basic GUI widgets
+%include "j3kfs.asm"          ; j3kOS filesystem
+%include "sound.asm"          ; PC speaker beep
+%include "vmm.asm"            ; Virtual Memory Manager (paging)
+
+; Advanced networking disabled to save space
+; Re-enable when implementing full network stack
+; %include "tcp.asm"          ; TCP/IP protocol stack
+; %include "http.asm"         ; HTTP client/server
+; %include "json.asm"         ; JSON parser
+; %include "rest_api.asm"     ; REST API interface
+; %include "editor.asm"       ; Text editor
 
 ; compress multiple cold pages (for memory pressure)
 compress_cold_pages:
@@ -2158,6 +2398,16 @@ irq0_handler:
     
     ; count up
     inc dword [timer_ticks]
+    
+    ; Update VMM page aging every 10 ticks
+    mov eax, [timer_ticks]
+    xor edx, edx
+    mov ebx, 10
+    div ebx
+    test edx, edx
+    jnz .no_vmm_aging
+    call vmm_page_timer_tick
+    .no_vmm_aging:
     
     ; update page aging every 100 ticks
     mov eax, [timer_ticks]
@@ -2770,6 +3020,48 @@ process_command:
     test eax, eax
     jz .test_malloc
     
+    ; is it ":vmm"?
+    mov esi, cmd_buffer
+    mov edi, cmd_vmm
+    call strcmp
+    test eax, eax
+    jz .test_vmm
+    
+    ; is it ":vmalloc"?
+    mov esi, cmd_buffer
+    mov edi, cmd_vmalloc
+    call strcmp
+    test eax, eax
+    jz .vmm_alloc
+    
+    ; is it ":vmap"?
+    mov esi, cmd_buffer
+    mov edi, cmd_vmap
+    call strcmp
+    test eax, eax
+    jz .vmm_map
+    
+    ; is it ":compress"?
+    mov esi, cmd_buffer
+    mov edi, cmd_compress
+    call strcmp
+    test eax, eax
+    jz .vmm_compress_test
+    
+    ; is it ":decompress"?
+    mov esi, cmd_buffer
+    mov edi, cmd_decompress
+    call strcmp
+    test eax, eax
+    jz .vmm_decompress_test
+    
+    ; is it ":paging"?
+    mov esi, cmd_buffer
+    mov edi, cmd_paging
+    call strcmp
+    test eax, eax
+    jz .enable_paging
+    
     ; is it ":free"?
     mov esi, cmd_buffer
     mov edi, cmd_free
@@ -3102,14 +3394,176 @@ process_command:
         call scan_pci
         jmp .done
     
-    .test_malloc:
-        mov esi, msg_malloc_test
+    .test_vmm:
+        call vmm_show_stats
+        jmp .done
+    
+    .vmm_alloc:
+        mov esi, msg_vmm_test_alloc
         call print_string
-        mov ecx, 256        ; allocate 256 bytes
-        call malloc
+        mov ecx, 0x4000             ; Allocate 16KB
+        call vmm_alloc
+        test eax, eax
+        jz .vmm_alloc_fail
         call print_hex
-        mov al, 10
-        call print_char
+        mov esi, msg_ok_alloc
+        call print_string
+        jmp .done
+        .vmm_alloc_fail:
+            mov esi, msg_vmm_fail
+            call print_string
+            jmp .done
+    
+    .vmm_map:
+        mov esi, msg_vmm_test_map
+        call print_string
+        mov eax, 0x800000           ; Virtual address
+        call vmm_alloc_frame        ; Get physical frame
+        test eax, eax
+        jz .vmm_map_fail
+        mov ebx, eax                ; Physical address
+        mov eax, 0x800000           ; Virtual address
+        mov ecx, (VMM_PRESENT | VMM_WRITABLE | VMM_USER)
+        call vmm_map_page
+        mov esi, msg_vmm_mapped
+        call print_string
+        jmp .done
+        .vmm_map_fail:
+            mov esi, msg_vmm_fail
+            call print_string
+            jmp .done
+    
+    .vmm_compress_test:
+        mov esi, msg_vmm_compress_test
+        call print_string
+        
+        ; Allocate a page
+        mov ecx, 0x1000
+        call vmm_alloc
+        test eax, eax
+        jz .vmm_compress_fail
+        mov [test_vmm_page], eax
+        
+        ; Fill with pattern (lots of repeated bytes for compression)
+        mov edi, eax
+        mov ecx, 1024
+        mov eax, 0xAAAAAAAA
+        rep stosd
+        
+        ; Get page index and mark as cold
+        mov eax, [test_vmm_page]
+        shr eax, 12
+        mov esi, eax
+        shl esi, 4
+        add esi, vmm_page_tracking
+        mov byte [esi], PAGE_COLD
+        mov word [esi + 2], VMM_COMPRESS_THRESHOLD
+        
+        ; Compress the page
+        call vmm_compress_page
+        
+        mov esi, msg_vmm_compressed_ok
+        call print_string
+        call vmm_show_stats
+        jmp .done
+        
+        .vmm_compress_fail:
+            mov esi, msg_vmm_fail
+            call print_string
+            jmp .done
+    
+    .vmm_decompress_test:
+        mov esi, msg_vmm_decompress_test
+        call print_string
+        
+        ; Access the compressed page (triggers decompression)
+        mov eax, [test_vmm_page]
+        shr eax, 12
+        call vmm_page_accessed
+        
+        mov esi, msg_vmm_decompressed_ok
+        call print_string
+        call vmm_show_stats
+        jmp .done
+    
+    .enable_paging:
+        mov esi, msg_paging_enable
+        call print_string
+        call vmm_enable_paging
+        mov esi, msg_paging_enabled
+        call print_string
+        jmp .done
+    
+    .test_malloc:
+        mov esi, msg_malloc_header
+        call print_string
+        
+        ; Test 1: Small allocation (256 bytes)
+        mov esi, msg_malloc_test1
+        call print_string
+        mov ecx, 256
+        call malloc
+        test eax, eax
+        jz .malloc_fail
+        mov [test_ptr1], eax
+        call print_hex
+        mov esi, msg_ok_alloc
+        call print_string
+        
+        ; Test 2: Medium allocation (4KB)
+        mov esi, msg_malloc_test2
+        call print_string
+        mov ecx, 4096
+        call malloc
+        test eax, eax
+        jz .malloc_fail
+        mov [test_ptr2], eax
+        call print_hex
+        mov esi, msg_ok_alloc
+        call print_string
+        
+        ; Test 3: Large allocation (64KB)
+        mov esi, msg_malloc_test3
+        call print_string
+        mov ecx, 65536
+        call malloc
+        test eax, eax
+        jz .malloc_fail
+        mov [test_ptr3], eax
+        call print_hex
+        mov esi, msg_ok_alloc
+        call print_string
+        
+        ; Test 4: Free allocations
+        mov esi, msg_malloc_free
+        call print_string
+        mov eax, [test_ptr1]
+        call free
+        mov eax, [test_ptr2]
+        call free
+        mov eax, [test_ptr3]
+        call free
+        mov esi, msg_malloc_freed
+        call print_string
+        
+        ; Test 5: Reallocate to test reuse
+        mov esi, msg_malloc_realloc
+        call print_string
+        mov ecx, 512
+        call malloc
+        test eax, eax
+        jz .malloc_fail
+        call print_hex
+        mov esi, msg_ok_alloc
+        call print_string
+        
+        mov esi, msg_malloc_success
+        call print_string
+        jmp .done
+        
+    .malloc_fail:
+        mov esi, msg_malloc_failed
+        call print_string
         jmp .done
     
     .test_free:
@@ -3614,6 +4068,12 @@ msg_boot:       db 'j3kOS 32-bit Protected Mode', 10
                 db 'by Jortboy3k (@jortboy3k)', 10, 10, 0
 msg_safe_mode:  db '[SAFE MODE]', 10, 0
 msg_verbose_mode: db '[VERBOSE MODE]', 10, 0
+msg_init_idt_ok: db '[INIT] IDT OK', 10, 0
+msg_init_pic_ok: db '[INIT] PIC OK', 10, 0
+msg_init_pit_ok: db '[INIT] PIT OK', 10, 0
+msg_init_kb_ok:  db '[INIT] Keyboard OK', 10, 0
+msg_init_tss_ok: db '[INIT] TSS OK', 10, 0
+msg_init_page_ok: db '[INIT] Page Mgmt OK', 10, 0
 msg_ready:      db 'System ready. Type "help" for commands.', 10, 10, 0
 msg_prompt:     db '> ', 0
 msg_unknown:    db 'Unknown command. Type "help" for list.', 10, 0
@@ -3623,7 +4083,9 @@ msg_help_text:  db 'j3kOS commands (: optional):', 10, 10
                 db 'net, netstats, ping <ip>', 10
                 db 'loadnet (load network extensions)', 10
                 db 'format, mount, ls, read <f>, write <f> <t>, del <f>', 10
-                db 'pages, swap, tasks', 10, 0
+                db 'pages, swap, tasks', 10
+                db 'malloc, vmm, vmalloc, vmap', 10
+                db 'compress, decompress (test hot/cold page compression)', 10, 0
 msg_time_text:  db 'Timer ticks: 0x', 0
 msg_mem_text:   db '32MB ram, kernel @ 0x10000, stack @ 0x90000', 10, 0
 msg_reboot_text: db 'rebooting...', 10, 0
@@ -3663,6 +4125,12 @@ cmd_timezone:   db ':timezone ', 0
 cmd_pci:        db ':pci', 0
 cmd_malloc:     db ':malloc', 0
 cmd_free:       db ':free', 0
+cmd_vmm:        db ':vmm', 0
+cmd_vmalloc:    db ':vmalloc', 0
+cmd_vmap:       db ':vmap', 0
+cmd_compress:   db ':compress', 0
+cmd_decompress: db ':decompress', 0
+cmd_paging:     db ':paging', 0
 cmd_syscall:    db ':syscall', 0
 cmd_tasks:      db ':tasks', 0
 cmd_net:        db ':net', 0
@@ -3686,7 +4154,30 @@ netext_base:    dd 0
 msg_year_prefix: db '20', 0
 msg_tz_set:     db 'Timezone offset set!', 10, 0
 msg_tz_current: db 'Current timezone offset: ', 0
-msg_malloc_test: db 'Allocated 256 bytes at: 0x', 0
+msg_malloc_header: db 'Memory Allocator Test Suite', 10, 0
+msg_malloc_test1: db '  [1/5] Allocating 256 bytes...   0x', 0
+msg_malloc_test2: db '  [2/5] Allocating 4096 bytes...  0x', 0
+msg_malloc_test3: db '  [3/5] Allocating 65536 bytes... 0x', 0
+msg_malloc_free:  db '  [4/5] Freeing all allocations...', 0
+msg_malloc_freed: db ' OK', 10, 0
+msg_malloc_realloc: db '  [5/5] Reallocating 512 bytes... 0x', 0
+msg_ok_alloc:    db ' OK', 10, 0
+msg_malloc_success: db 'All tests passed! Allocator working correctly.', 10, 0
+msg_malloc_failed: db ' FAILED!', 10, 'Error: Out of memory or heap corruption.', 10, 0
+msg_vmm_test_alloc: db 'Allocating 16KB virtual memory... 0x', 0
+msg_vmm_test_map:   db 'Mapping page at 0x800000... ', 0
+msg_vmm_mapped:     db 'OK - Page mapped successfully!', 10, 0
+msg_vmm_fail:       db 'FAILED - Out of memory!', 10, 0
+msg_vmm_compress_test: db 'Testing page compression (RLE)...', 10, 0
+msg_vmm_compressed_ok: db 'Page compressed successfully!', 10, 0
+msg_vmm_decompress_test: db 'Testing page decompression...', 10, 0
+msg_vmm_decompressed_ok: db 'Page decompressed successfully!', 10, 0
+msg_paging_enable: db 'Enabling hardware paging...', 10, 0
+msg_paging_enabled: db 'Paging enabled! CR0.PG=1, CR3=0x00200000', 10, 0
+test_ptr1: dd 0
+test_ptr2: dd 0
+test_ptr3: dd 0
+test_vmm_page: dd 0
 msg_free_test:  db 'Free is available (use with pointer)', 10, 0
 msg_syscall_test: db 'Testing syscall interface...', 10, 0
 msg_syscall_hello: db 'Syscall works! (printed via INT 0x80)', 10, 0
@@ -3733,3 +4224,8 @@ MAX_FILES equ 16
 file_count: dd 0
 file_table: times (MAX_FILES * 32) db 0  ; 16 files, 32 bytes each (16 for name, 16 reserved)
 file_read_buffer: times 4096 db 0        ; buffer for reading files
+
+; ========================================
+; END OF KERNEL MARKER
+; ========================================
+kernel_end:
