@@ -37,37 +37,134 @@ mouse_x:            dd 160      ; current mouse position
 mouse_y:            dd 100
 mouse_buttons:      db 0        ; bit 0=left, 1=right, 2=middle
 mouse_initialized:  db 0
+mouse_cycle:        db 0        ; 0, 1, 2
+mouse_byte0:        db 0
+mouse_byte1:        db 0
+mouse_byte2:        db 0
 
 ; init PS/2 mouse
 init_mouse:
     pusha
     
-    ; enable mouse (send 0xA8 to port 0x64)
+    ; 1. Disable Keyboard (Port 0x64, Cmd 0xAD)
+    call mouse_wait
+    mov al, 0xAD
+    out 0x64, al
+    
+    ; 2. Disable Mouse (Port 0x64, Cmd 0xA7)
+    call mouse_wait
+    mov al, 0xA7
+    out 0x64, al
+    
+    ; 3. Flush Output Buffer
+    call mouse_flush
+    
+    ; 4. Get Compaq Status Byte (Cmd 0x20)
+    call mouse_wait
+    mov al, 0x20
+    out 0x64, al
+    call mouse_wait_read
+    in al, 0x60
+    mov bl, al          ; Save status byte
+    
+    ; 5. Set Bit 1 (IRQ12) and Clear Bit 5 (Disable Mouse Clock)
+    or bl, 2
+    and bl, 0xDF
+    
+    ; 6. Set Compaq Status Byte (Cmd 0x60)
+    call mouse_wait
+    mov al, 0x60
+    out 0x64, al
+    call mouse_wait
+    mov al, bl
+    out 0x60, al
+    
+    ; 7. Enable Mouse (Cmd 0xA8)
+    call mouse_wait
     mov al, 0xA8
     out 0x64, al
     
-    ; wait a bit
-    mov ecx, 10000
-    .wait1:
-        nop
-        loop .wait1
+    ; 8. Reset Mouse (Write 0xFF to 0x60 via 0xD4)
+    call mouse_write
+    mov al, 0xFF
+    out 0x60, al
+    call mouse_read_ack ; Expect 0xFA
+    call mouse_read_ack ; Expect 0xAA (Self-test)
+    call mouse_read_ack ; Expect 0x00 (ID)
     
-    ; get mouse data (send 0xD4 then 0xF4)
-    mov al, 0xD4
-    out 0x64, al
-    
-    mov ecx, 10000
-    .wait2:
-        nop
-        loop .wait2
-    
+    ; 9. Enable Streaming (Write 0xF4 to 0x60 via 0xD4)
+    call mouse_write
     mov al, 0xF4
     out 0x60, al
+    call mouse_read_ack ; Expect 0xFA
+    
+    ; 10. Enable Keyboard (Cmd 0xAE)
+    call mouse_wait
+    mov al, 0xAE
+    out 0x64, al
     
     ; mouse is ready baby
     mov byte [mouse_initialized], 1
+    mov byte [mouse_cycle], 0
     
     popa
+    ret
+
+; wait for input buffer to be clear (so we can write)
+mouse_wait:
+    push ecx
+    push ax
+    mov ecx, 100000
+    .loop:
+        in al, 0x64
+        test al, 2
+        jz .done
+        loop .loop
+    .done:
+    pop ax
+    pop ecx
+    ret
+
+; wait for output buffer to have data (so we can read)
+mouse_wait_read:
+    push ecx
+    push ax
+    mov ecx, 100000
+    .loop:
+        in al, 0x64
+        test al, 1
+        jnz .done
+        loop .loop
+    .done:
+    pop ax
+    pop ecx
+    ret
+
+; flush output buffer
+mouse_flush:
+    push ax
+    .loop:
+        in al, 0x64
+        test al, 1
+        jz .done
+        in al, 0x60
+        jmp .loop
+    .done:
+    pop ax
+    ret
+
+; prepare to write to mouse (0xD4)
+mouse_write:
+    call mouse_wait
+    mov al, 0xD4
+    out 0x64, al
+    call mouse_wait
+    ret
+
+; read acknowledge byte (0xFA)
+mouse_read_ack:
+    call mouse_wait_read
+    in al, 0x60
     ret
 
 ; update mouse position (call this from IRQ12 handler)
@@ -75,48 +172,77 @@ init_mouse:
 mouse_update:
     pusha
     
-    ; check if mouse data is available (non-blocking)
+    ; check status register
     in al, 0x64
-    test al, 1          ; data available?
-    jz .done            ; no data, skip update
+    test al, 0x01       ; Output buffer full?
+    jz .done
+    test al, 0x20       ; Mouse data? (Bit 5)
+    jz .not_mouse
     
     ; read mouse data from port 0x60
     in al, 0x60
-    mov [.packet], al
+    mov bl, al          ; save byte
     
-    ; wait for dx (with timeout)
-    mov ecx, 100        ; reduced timeout
-    .wait1:
-        in al, 0x64
-        test al, 1
-        jnz .got_dx
-        loop .wait1
-    jmp .done
+    ; State Machine
+    movzx ecx, byte [mouse_cycle]
     
-    .got_dx:
-    in al, 0x60
-    mov [.dx], al
+    cmp ecx, 0
+    je .cycle0
+    cmp ecx, 1
+    je .cycle1
+    cmp ecx, 2
+    je .cycle2
+    jmp .reset_cycle
     
-    ; wait for dy (with timeout)
-    mov ecx, 100        ; reduced timeout
-    .wait2:
-        in al, 0x64
-        test al, 1
-        jnz .got_dy
-        loop .wait2
-    jmp .done
+    .cycle0:
+        ; Byte 0: Flags
+        test bl, 0x08       ; Bit 3 must be 1
+        jz .reset_cycle     ; sync error
+        
+        test bl, 0xC0       ; Check X/Y overflow (Bits 6,7)
+        jnz .reset_cycle    ; If overflow, discard packet
+        
+        mov [mouse_byte0], bl
+        inc byte [mouse_cycle]
+        jmp .done
+        
+    .cycle1:
+        ; Byte 1: DX
+        mov [mouse_byte1], bl
+        inc byte [mouse_cycle]
+        jmp .done
+        
+    .cycle2:
+        ; Byte 2: DY
+        mov [mouse_byte2], bl
+        mov byte [mouse_cycle], 0
+        
+        ; Process full packet
+        call process_mouse_packet
+        jmp .done
+        
+    .reset_cycle:
+        mov byte [mouse_cycle], 0
+        jmp .done
+        
+    .not_mouse:
+        ; Not mouse data, ignore
+        jmp .done
     
-    .got_dy:
-    in al, 0x60
-    mov [.dy], al
+    .done:
+    popa
+    ret
+
+process_mouse_packet:
+    pusha
     
     ; update buttons
-    mov al, [.packet]
+    mov al, [mouse_byte0]
     and al, 0x07        ; mask button bits
     mov [mouse_buttons], al
     
     ; update x position
-    movsx eax, byte [.dx]
+    movsx eax, byte [mouse_byte1]
     add [mouse_x], eax
     
     ; clamp x to screen bounds
@@ -125,15 +251,15 @@ mouse_update:
     jge .x_not_neg
     mov dword [mouse_x], 0
     .x_not_neg:
-    cmp eax, VGA_WIDTH
+    cmp eax, GFX_WIDTH
     jl .x_not_big
-    mov eax, VGA_WIDTH
+    mov eax, GFX_WIDTH
     dec eax
     mov [mouse_x], eax
     .x_not_big:
     
     ; update y position (note: dy is inverted)
-    movsx eax, byte [.dy]
+    movsx eax, byte [mouse_byte2]
     neg eax             ; flip sign
     add [mouse_y], eax
     
@@ -143,20 +269,15 @@ mouse_update:
     jge .y_not_neg
     mov dword [mouse_y], 0
     .y_not_neg:
-    cmp eax, VGA_HEIGHT
+    cmp eax, GFX_HEIGHT
     jl .y_not_big
-    mov eax, VGA_HEIGHT
+    mov eax, GFX_HEIGHT
     dec eax
     mov [mouse_y], eax
     .y_not_big:
     
-    .done:
     popa
     ret
-    
-    .packet: db 0
-    .dx: db 0
-    .dy: db 0
 
 ; draw mouse cursor (simple arrow)
 draw_mouse_cursor:
@@ -622,6 +743,9 @@ update_buttons:
 gui_demo:
     pusha
     
+    ; Switch to graphics mode (320x200x256)
+    call set_graphics_mode
+    
     ; initialize mouse
     call init_mouse
     
@@ -678,8 +802,8 @@ gui_demo:
         mov al, 3           ; Cyan background
         call clear_graphics_screen
         
-        ; 2. Update Mouse
-        call mouse_update
+        ; 2. Update Mouse (Handled by IRQ12 now)
+        ; call mouse_update
         
         ; 3. Update Logic (Buttons)
         call update_buttons
@@ -734,6 +858,9 @@ gui_demo:
         jmp .loop
     
     .exit:
+    ; Switch back to text mode
+    call set_text_mode
+    
     popa
     ret
 
@@ -772,3 +899,17 @@ gui_button1_label:      db 'Button 1', 0
 gui_button2_label:      db 'Button 2', 0
 gui_button3_label:      db 'Exit to Text', 0
 gui_status_msg:         db 'Click a button...  ', 0
+
+; IRQ12 Handler - Mouse
+irq12_handler:
+    pusha
+    
+    call mouse_update
+    
+    ; Send EOI to PIC (slave)
+    mov al, 0x20
+    out 0xA0, al
+    out 0x20, al
+    
+    popa
+    iret

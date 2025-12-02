@@ -41,6 +41,17 @@ VMM_COW             equ 0x200       ; Copy-on-write (custom flag, bit 9)
 VMM_SWAPPED         equ 0x400       ; Page swapped to disk (custom flag, bit 10)
 VMM_RESERVED        equ 0x800       ; Reserved for future use
 
+; Page Tracking Constants (Namespaced to avoid conflict with memory.asm)
+VMM_PAGE_COUNT          equ 4096        ; Track first 16MB
+VMM_PAGE_FREE           equ 0
+VMM_PAGE_ALLOCATED      equ 1
+VMM_PAGE_HOT            equ 2
+VMM_PAGE_COLD           equ 3
+VMM_PAGE_COMPRESSED     equ 4
+VMM_PAGE_SWAPPED        equ 5
+
+vmm_tracking_table      equ 0x800000    ; Place tracking table at 8MB
+
 ; Virtual memory statistics
 vmm_page_faults:        dd 0
 vmm_pages_allocated:    dd 0
@@ -67,7 +78,7 @@ VMM_COMPRESS_THRESHOLD  equ 100     ; Ticks cold before compression
 ; offset 4: physical_addr (4 bytes)
 ; offset 8: compressed_size (4 bytes)
 ; offset 12: flags (4 bytes)
-vmm_page_tracking:  times (PAGE_COUNT * 16) db 0
+
 
 ; Page frame allocator (physical memory)
 ; Bitmap: 1 bit per 4KB page, up to 4GB (1MB bitmap for 32GB)
@@ -542,7 +553,7 @@ vmm_install_page_fault_handler:
     mov edi, 0x50                   ; IDT base + (14 * 8)
     
     ; Set handler address
-    mov eax, vmm_page_fault_handler
+    mov eax, vmm_page_fault_handler_enhanced
     mov word [edi], ax              ; Low 16 bits
     shr eax, 16
     mov word [edi + 6], ax          ; High 16 bits
@@ -730,16 +741,16 @@ vmm_page_accessed:
     
     ; Get page index
     shr eax, 12
-    cmp eax, PAGE_COUNT
+    cmp eax, VMM_PAGE_COUNT
     jge .done
     
     ; Get tracking entry
     mov esi, eax
     shl esi, 4
-    add esi, vmm_page_tracking
+    add esi, vmm_tracking_table
     
     ; Check if page is compressed - need to decompress first
-    cmp byte [esi], PAGE_COMPRESSED
+    cmp byte [esi], VMM_PAGE_COMPRESSED
     je .decompress_page
     
     ; Increment access count (with saturation at 255)
@@ -758,9 +769,9 @@ vmm_page_accessed:
         jl .done
         
         ; Mark as hot if not already
-        cmp byte [esi], PAGE_HOT
+        cmp byte [esi], VMM_PAGE_HOT
         je .done
-        mov byte [esi], PAGE_HOT
+        mov byte [esi], VMM_PAGE_HOT
         inc dword [vmm_hot_pages]
         jmp .done
     
@@ -781,15 +792,15 @@ vmm_page_accessed:
 vmm_page_timer_tick:
     pusha
     
-    mov ecx, PAGE_COUNT
-    mov esi, vmm_page_tracking
+    mov ecx, VMM_PAGE_COUNT
+    mov esi, vmm_tracking_table
     xor ebx, ebx                    ; page index
     
     .tick_loop:
         ; Skip free pages
-        cmp byte [esi], PAGE_FREE
+        cmp byte [esi], VMM_PAGE_FREE
         je .next_page
-        cmp byte [esi], PAGE_SWAPPED
+        cmp byte [esi], VMM_PAGE_SWAPPED
         je .next_page
         
         ; Increment ticks since access (with saturation)
@@ -805,23 +816,23 @@ vmm_page_timer_tick:
             jl .check_compress
             
             ; Mark as cold if not already
-            cmp byte [esi], PAGE_COLD
+            cmp byte [esi], VMM_PAGE_COLD
             jne .mark_cold
             jmp .check_compress
             
             .mark_cold:
                 ; Decrease hot count if was hot
-                cmp byte [esi], PAGE_HOT
+                cmp byte [esi], VMM_PAGE_HOT
                 jne .set_cold
                 dec dword [vmm_hot_pages]
                 
                 .set_cold:
-                    mov byte [esi], PAGE_COLD
+                    mov byte [esi], VMM_PAGE_COLD
                     inc dword [vmm_cold_pages]
         
         .check_compress:
             ; Check if page should be compressed
-            cmp byte [esi], PAGE_COLD
+            cmp byte [esi], VMM_PAGE_COLD
             jne .next_page
             
             mov ax, [esi + 2]
@@ -859,16 +870,16 @@ vmm_compress_page:
     push edi
     
     ; Bounds check
-    cmp eax, PAGE_COUNT
+    cmp eax, VMM_PAGE_COUNT
     jge .done
     
     ; Get tracking entry
     mov ebx, eax
     shl ebx, 4
-    add ebx, vmm_page_tracking
+    add ebx, vmm_tracking_table
     
     ; Verify page is cold
-    cmp byte [ebx], PAGE_COLD
+    cmp byte [ebx], VMM_PAGE_COLD
     jne .done
     
     ; Get physical address
@@ -876,8 +887,8 @@ vmm_compress_page:
     test esi, esi
     jz .done
     
-    ; Allocate temporary buffer for compressed data (at 0x300000)
-    mov edi, 0x300000
+    ; Allocate temporary buffer for compressed data
+    mov edi, vmm_temp_buffer
     
     ; Simple RLE compression
     mov ecx, PAGE_SIZE_BYTES
@@ -928,13 +939,13 @@ vmm_compress_page:
         mov [ebx + 8], edx
         
         ; Copy compressed data back to original page
-        mov esi, 0x300000
+        mov esi, vmm_temp_buffer
         mov edi, [ebx + 4]
         mov ecx, edx
         rep movsb
         
         ; Mark as compressed
-        mov byte [ebx], PAGE_COMPRESSED
+        mov byte [ebx], VMM_PAGE_COMPRESSED
         dec dword [vmm_cold_pages]
         inc dword [vmm_compressed_pages]
         inc dword [vmm_compressions]
@@ -961,16 +972,16 @@ vmm_decompress_page:
     push edi
     
     ; Bounds check
-    cmp eax, PAGE_COUNT
+    cmp eax, VMM_PAGE_COUNT
     jge .done
     
     ; Get tracking entry
     mov ebx, eax
     shl ebx, 4
-    add ebx, vmm_page_tracking
+    add ebx, vmm_tracking_table
     
     ; Verify page is compressed
-    cmp byte [ebx], PAGE_COMPRESSED
+    cmp byte [ebx], VMM_PAGE_COMPRESSED
     jne .done
     
     ; Get physical address and compressed size
@@ -982,12 +993,12 @@ vmm_decompress_page:
     jz .done
     
     ; Copy compressed data to temp buffer
-    mov edi, 0x300000
+    mov edi, vmm_temp_buffer
     mov ecx, edx
     rep movsb
     
     ; Decompress from temp buffer back to page
-    mov esi, 0x300000
+    mov esi, vmm_temp_buffer
     mov edi, [ebx + 4]
     mov ecx, edx
     
@@ -1014,7 +1025,7 @@ vmm_decompress_page:
     
     .decompress_done:
         ; Mark as hot (just accessed)
-        mov byte [ebx], PAGE_HOT
+        mov byte [ebx], VMM_PAGE_HOT
         mov byte [ebx + 1], VMM_HOT_THRESHOLD
         mov word [ebx + 2], 0
         mov dword [ebx + 8], 0      ; clear compressed size
@@ -1052,21 +1063,21 @@ vmm_page_fault_handler_enhanced:
     shr edx, 12
     
     ; Check if page is tracked
-    cmp edx, PAGE_COUNT
+    cmp edx, VMM_PAGE_COUNT
     jge .not_tracked
     
     ; Get tracking entry
     mov esi, edx
     shl esi, 4
-    add esi, vmm_page_tracking
+    add esi, vmm_tracking_table
     
     ; Check page state
     movzx ecx, byte [esi]
     
-    cmp ecx, PAGE_COMPRESSED
+    cmp ecx, VMM_PAGE_COMPRESSED
     je .handle_compressed
     
-    cmp ecx, PAGE_SWAPPED
+    cmp ecx, VMM_PAGE_SWAPPED
     je .handle_swapped
     
     jmp .standard_fault
@@ -1144,3 +1155,5 @@ msg_vmm_hot:            db 'Hot pages: ', 0
 msg_vmm_cold:           db 'Cold pages: ', 0
 msg_vmm_compressed:     db 'Compressed pages: ', 0
 msg_vmm_compressions:   db 'Compressions/Decompressions: ', 0
+
+vmm_temp_buffer:        times 4096 db 0

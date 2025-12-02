@@ -109,3 +109,12 @@ show_swap_info:
     
     popa
     ret
+
+msg_swap_info:      db 10, '--- Swap Space Info ---', 10, 0
+msg_swap_used:      db 'Used slots: ', 0
+msg_swap_slots:     db ' slots', 10, 0
+msg_swap_kb:        db 'Swap usage: ', 0
+msg_kb_used:        db ' KB', 10, 0
+msg_swap_writes:    db 'Swap writes: ', 0
+msg_swap_reads:     db 'Swap reads: ', 0
+
